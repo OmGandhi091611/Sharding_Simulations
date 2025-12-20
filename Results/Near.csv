@@ -1,0 +1,4 @@
+currency,nodes,wallets,miners,transactions,interval,shards,average block time,block size,messages,mode,tps,no. of blocks generated
+near,1000,1000,1000,1000,0.01,4,0.61,1800,559892,sharded,2959.9847,556
+near,1000,1000,1000,1000,0.01,6,0.61,2100,482247,sharded,3418.7128,477
+near,1000,1000,1000,1000,0.01,9,0.59,2400,424089,sharded,4068.2828,417

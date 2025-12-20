@@ -1,0 +1,5 @@
+currency,nodes,wallets,miners,transactions,interval,average block time,block size,messages,tps,no. of blocks generated ,blocktime in configuration file
+btc,1000,1000,1000,1000,10,679.68,4096,245000,6.006,245,600
+bch,1000,1000,1000,1000,10,600.82,131072,8000,233.3402,8,600
+ltc,1000,1000,1000,1000,10,157.44,4096,245000,25.9312,245,150
+doge,1000,1000,1000,1000,10,57.27,4096,245000,49.1049,245,75
