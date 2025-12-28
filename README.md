@@ -150,10 +150,9 @@ near,1000,1000,1000,1000,0.01,9,0.59,2400,424089,sharded,4068.2828,417
 Parallel runners live in `Parallel_processes/` and launch many configs concurrently.
 
 ```bash
-cd Parallel_processes
-python3 non_sharded_parallel.py
-python3 near_parallel.py
-python3 memo_parallel.py
+python Parallel_processes/non_sharded_parallel.py
+python Parallel_processes/near_parallel.py
+python Parallel_processes/memo_parallel.py
 ```
 
 Parallel runner script knobs (edit inside the runner file):
@@ -163,7 +162,7 @@ Parallel runner script knobs (edit inside the runner file):
 
 ---
 
-## Plot generation (`make_graphs.py`)
+## Plot generation (`graph.py`)
 
 What it does:
 - reads CSVs from `Results/`
@@ -202,9 +201,9 @@ Display + selection:
 Examples:
 
 ```bash
-python3 make_graphs.py --no_show
-python3 make_graphs.py --skip_validation --no_show
-python3 make_graphs.py --near_csv Near.csv --near_out near_graphs --no_show
+python3 graph.py --no_show
+python3 graph.py --skip_validation --no_show
+python3 graph.py --near_csv Near.csv --near_out near_graphs --no_show
 ```
 
 ---
