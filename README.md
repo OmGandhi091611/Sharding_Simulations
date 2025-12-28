@@ -1,6 +1,6 @@
 # Sharding_Simulations
 
-Python-based simulation framework to evaluate **non-sharded** (Bitcoin-style), **NEAR-like sharded**, and **MEMO-style sharded** designs under configurable network + workload parameters.
+Python-based simulation framework to evaluate blockchain throughput/scalability across **non-sharded** (Bitcoin-style), **NEAR-like sharded**, and **MEMO-style sharded** designs under configurable network and workload parameters.
 
 This repo includes:
 - `simulation.py` for **single-run** experiments (`--config <file>.json`)
@@ -14,6 +14,68 @@ This repo includes:
 Important: `Results/` and all graph folders are expected to be at the **same directory level**.
 
 ---
+
+## Why this repo exists
+
+Sharding increases throughput by splitting execution/validation across multiple shards, but it can also increase coordination overhead, message volume, and end-to-end latency. This simulator is designed to make those tradeoffs measurable and reproducible across many configurations.
+
+### Research questions this simulator helps answer
+- How does throughput scale as shard count increases under a fixed network/workload model?
+- When do coordination and cross-shard messages dominate, causing diminishing returns?
+- How do block size and target block time interact with shard count and network constraints?
+- How do different sharded designs compare under the *same* assumptions and workload?
+
+## Quickstart (aim: first CSV row in minutes)
+
+1) Create and activate a virtual environment, then install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2) Pick any config JSON and run a single simulation:
+
+```bash
+# Example: grab the first config found (adjust the folder if needed)
+CONFIG=$(ls memo_config 2>/dev/null | head -n 1) || true
+if [ -n "$CONFIG" ]; then
+  python3 simulation.py --config "memo_config/$CONFIG"
+else
+  CONFIG=$(ls near_config 2>/dev/null | head -n 1) || true
+  python3 simulation.py --config "near_config/$CONFIG"
+fi
+```
+
+3) Generate plots from whatever CSVs you produced in `Results/`:
+
+```bash
+python3 make_graphs.py --results_dir Results --no_show
+```
+
+## Reproducing paper figures
+
+Once your ICDCS paper is finalized, this section should become the single source of truth for reproducing each figure. A good pattern is:
+
+- Put “paper figure” configs under a dedicated folder (e.g., `paper_configs/figure_3/`).
+- For each figure, list: (a) which configs to run, (b) the expected CSV output name(s), and (c) the plotting command.
+
+Example template (replace with your actual figure IDs/configs):
+
+```bash
+# Figure 3: Throughput vs shards (example)
+python3 simulation.py --config paper_configs/figure_3/near_sweep.json
+python3 make_graphs.py --results_dir Results --near_out near_graphs --no_show
+```
+
+## Assumptions and limitations
+
+This simulator is intended for controlled, repeatable experimentation—not for making absolute performance guarantees about any production network. When interpreting results:
+- Treat trends and comparisons as primary (relative behavior across configs), not point predictions.
+- Be explicit about the network and workload assumptions encoded in each config.
+- If you compare two designs, keep assumptions consistent and vary one factor at a time where possible.
+
 
 ## Repository structure
 
@@ -162,7 +224,7 @@ Parallel runner script knobs (edit inside the runner file):
 
 ---
 
-## Plot generation (`graph.py`)
+## Plot generation (`make_graphs.py`)
 
 What it does:
 - reads CSVs from `Results/`
@@ -201,9 +263,9 @@ Display + selection:
 Examples:
 
 ```bash
-python3 graph.py --no_show
-python3 graph.py --skip_validation --no_show
-python3 graph.py --near_csv Near.csv --near_out near_graphs --no_show
+python3 make_graphs.py --no_show
+python3 make_graphs.py --skip_validation --no_show
+python3 make_graphs.py --near_csv Near.csv --near_out near_graphs --no_show
 ```
 
 ---
@@ -237,6 +299,19 @@ This keeps validation plots separated from the main experiment plots.
 
 ---
 
+## Users / research use (optional, but recommended)
+
+As you share this simulator publicly, track external usage here (this becomes valuable evidence of independent adoption and impact):
+- Papers that cite this repository or associated preprints
+- External forks or downstream projects
+- Notable issues/PRs contributed by external users
+- Tutorials, talks, or workshop demos using the simulator
+
+## Releases and versioning (recommended)
+
+Consider tagging releases (e.g., `v1.0.0`) when results are paper-ready. A simple `CHANGELOG.md` and tagged releases make it easier for others to reproduce the exact version used in a paper.
+
+
 ## License
 
 MIT is a common choice for research code. Add a `LICENSE` file if you want a standalone license file.
@@ -244,6 +319,9 @@ MIT is a common choice for research code. Add a `LICENSE` file if you want a sta
 ---
 
 ## Citation
+
+If you use this code in academic work, please cite the associated paper (when available) and/or this repository. Consider adding a `CITATION.cff` file to make citation export easy for users (GitHub recognizes it automatically).
+
 
 If you use this simulator in a report/paper, cite as:
 
