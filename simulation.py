@@ -4,6 +4,9 @@ import argparse
 import random
 import json
 import os
+import csv
+from pathlib import Path
+
 
 # ============================================================
 # Globals
@@ -161,16 +164,14 @@ class Node:
 
             if DATA_TOKENS is not None:
                 # Token bucket: wait until we have enough bytes to send this block to all neighbors.
-                # If other blocks are sending at the same time, this will queue up.
                 yield DATA_TOKENS.get(total_bytes)
             elif DATA_BW_MBPS and DATA_BW_MBPS > 0:
-                # Fallback: simple deterministic delay based on bandwidth.
+                # Fallback: deterministic delay based on bandwidth.
                 Bps = DATA_BW_MBPS * 1e6 / 8.0
                 send_time = total_bytes / max(Bps, 1e-9)
                 yield self.env.timeout(send_time)
             # else: effectively infinite bandwidth, no delay
 
-        # Per-neighbor deliveries (each link has its own latency + CPU)
         for n in self.neighbors:
             io_requests += 1
             network_data += b.size
@@ -239,9 +240,7 @@ def coord(env,
           msg_proc_ms):
     """
     Metronome: S shard winners talk to metronome + each other, then block flood.
-
-    Round time:
-      dt_round = dt_mine + dt_verify + dt_coord_RTT + dt_ctrl_NIC
+    Round time includes mining + verification + coordination + control NIC.
     Block flood is modeled via Node graph (data-plane NIC).
     """
     global network_data, io_requests, total_tx, total_coins, pool
@@ -255,7 +254,6 @@ def coord(env,
     if total_hash <= 0:
         raise ValueError("Total hashrate must be > 0")
 
-    # Difficulty per shard
     if diff0 is not None:
         diff = float(diff0)
     else:
@@ -285,12 +283,10 @@ def coord(env,
         if has_tx and pool_processed is not None and pool_processed >= total_needed:
             break
 
-        # 1) Mining across shards
         shard_times = [random.expovariate(lam_shard) for _ in range(S)]
         dt_mine = max(shard_times)
         yield env.timeout(dt_mine)
 
-        # 2) Payload selection (fixed totalblocksize across shards)
         if has_tx:
             avail = len(pool)
             take = min(avail, tot_cap)
@@ -300,14 +296,11 @@ def coord(env,
         else:
             take = 0
 
-        # 3) Verification: slowest shard verifies ceil(take/S) tx
         max_shard_tx = (take + S - 1) // S if S > 0 else 0
         dt_verify = max_shard_tx * tx_cost_s
 
-        # 4) RTT coordination with metronome
         dt_coord = coord_delay
 
-        # 5) Control-plane messages through NIC
         msgs = metronome_messages(S, len(nodes))
         total_coordination_messages += msgs
         dt_ctrl_net = control_phase_delay(msgs, int(msg_size or 0))
@@ -321,9 +314,8 @@ def coord(env,
         if dt_rest > 0:
             yield env.timeout(dt_rest)
 
-        # Emit merged block
         bc += 1
-        txs_next = (take + 1) if has_tx else 1   # +1 coinbase
+        txs_next = (take + 1) if has_tx else 1
         b = Block(bc, txs_next, round_dt)
         total_tx += txs_next
         env.process(random.choice(nodes).receive(b))
@@ -434,12 +426,10 @@ def coord_no_metronome(env,
         if has_tx and pool_processed is not None and pool_processed >= total_needed:
             break
 
-        # 1) Mining
         shard_times = [random.expovariate(lam_shard) for _ in range(S)]
         dt_mine = max(shard_times)
         yield env.timeout(dt_mine)
 
-        # 2) Payload selection
         if has_tx:
             avail = len(pool)
             take = min(avail, tot_cap)
@@ -449,15 +439,11 @@ def coord_no_metronome(env,
         else:
             take = 0
 
-        # 3) Verification
         max_shard_tx = (take + S - 1) // S if S > 0 else 0
         dt_verify = max_shard_tx * tx_cost_s
 
-        # 4) Winner announcements (NIC)
         N = len(nodes)
         dt_ann, msgs_ann = winner_announce_phase(S, N, msg_size)
-
-        # 5) Pairwise coordination (NIC)
         dt_pair, msgs_pair = winner_pairwise_phase(S, msg_size)
 
         dt_control = dt_ann + dt_pair
@@ -592,13 +578,11 @@ def coord_leader_metronome(env,
         if has_tx and pool_processed is not None and pool_processed >= total_needed:
             break
 
-        # 1) Mining
         shard_times = [random.expovariate(lam_shard) for _ in range(S)]
         dt_mine = max(shard_times)
         leader_idx = min(range(S), key=lambda i: shard_times[i])
         yield env.timeout(dt_mine)
 
-        # 2) Payload
         if has_tx:
             avail = len(pool)
             take = min(avail, tot_cap)
@@ -608,7 +592,6 @@ def coord_leader_metronome(env,
         else:
             take = 0
 
-        # 3) Control plane: leader announce + others to leader
         N = len(nodes)
         dt_ann, msgs_ann = leader_announce_phase(N, msg_size)
         dt_to_leader, msgs_to_leader = to_leader_phase(S, msg_size)
@@ -616,7 +599,6 @@ def coord_leader_metronome(env,
         total_control_msgs += (msgs_ann + msgs_to_leader)
         total_msg_cost += (msgs_ann + msgs_to_leader) * float(msg_cost or 0.0)
 
-        # 4) Verification term
         txs_next = (take + 1) if has_tx else 1
         verify_mode_used = verify_mode or "leader"
 
@@ -630,11 +612,9 @@ def coord_leader_metronome(env,
             verify_note = f"verify_all@leader_par({threads}t)"
 
         elif verify_mode_used == "shard":
-            # parallel per-shard verification
             max_shard_tx = (txs_next - 1 + S - 1) // S if has_tx else 0
             dt_verify_term = max_shard_tx * tx_cost_s
 
-            # S attestations back to leader
             dt_attest = control_phase_delay(S, msg_size)
             dt_control += dt_attest
             total_control_msgs += S
@@ -713,12 +693,20 @@ def _print_final(now, bc, blocks_limit, diff, total_hash,
     tps_total = total_tx / total_time if total_time > 0 else 0.0
     msg_cost_per_tx = (total_msg_cost / total_tx) if total_tx > 0 else 0.0
 
+    # ---- UPDATED: store richer summary for machine consumption ----
     sim_summary = {
         "blocks": bc,
         "total_time": total_time,
         "avg_block_time": abt_global,
         "tps": tps_total,
-        "total_msgs": total_msgs,
+        "total_msgs": int(total_msgs),
+        "total_tx": int(total_tx),
+        "total_coins": float(total_coins),
+        "network_bytes": float(network_data),
+        "io_requests": int(io_requests),
+        "msg_cost_total": float(total_msg_cost),
+        "msg_cost_per_tx": float(msg_cost_per_tx),
+        "extra_fields": str(extra_fields),
     }
 
     print(
@@ -730,6 +718,7 @@ def _print_final(now, bc, blocks_limit, diff, total_hash,
         f"Msgs:{total_msgs} MsgCost_tot:{total_msg_cost:.2f} "
         f"(per_tx:{msg_cost_per_tx:.6f}) {extra_fields}"
     )
+
 
 # ============================================================
 # CLI
@@ -801,9 +790,12 @@ def main():
     p.add_argument("--verify_mode", type=str, default="leader",
                    choices=["leader", "shard", "leader_par"])
 
-    # NEAR-realistic preset
-    p.add_argument("--near_realistic", action="store_true",
-                   help="Override with NEAR-like realistic profile")
+    # Plot the Results
+    p.add_argument("--results_csv", type=str, default="",
+               help="Relative path under Results/ (e.g., Near.csv, non-sharded.csv)")
+    p.add_argument("--results_dir", type=str, default="Results",
+               help="Results output directory (default: Results)")
+
 
     args = p.parse_args()
 
@@ -830,10 +822,8 @@ def main():
     CTRL_BW_MBPS = args.control_bw_mbps
     DATA_BW_MBPS = args.broadcast_bw_mbps
 
-    # Build env & workload
     env = simpy.Environment()
 
-    # Initialize bandwidth token buckets (for data-plane NIC)
     init_bandwidth_buckets(env)
 
     total_tx_need = (args.wallets or 0) * (args.transactions or 0)
@@ -844,17 +834,14 @@ def main():
         for i in range(args.wallets or 0):
             env.process(wallet(env, i, args.transactions, args.interval))
 
-    # Network graph
     nodes = [Node(env, i) for i in range(args.nodes or 0)]
     for n in nodes:
         others = [x for x in nodes if x != n]
         deg = min(args.neighbors or 0, len(others))
         n.neighbors = random.sample(others, deg) if deg > 0 else []
 
-    # Miners
     miners = [Miner(i, args.hashrate or 0.0) for i in range(args.miners or 0)]
 
-    # Choose coordinator
     if args.leader_metronome:
         coord_proc = env.process(
             coord_leader_metronome(
@@ -946,13 +933,8 @@ def main():
         tps = 0.0
         msgs = 0
 
-    if args.leader_metronome:
-        mode = f"leader_{args.verify_mode}"
-    elif args.no_metronome:
-        mode = "no_metronome"
-    else:
-        mode = "metronome"
-
+    # PAPER "mode" you want in CSV:
+    mode = "conventional" if int(args.shards or 1) == 1 else "sharded"
     block_size_tx = float(args.total_blocksize or 0)
     shards = int(args.shards or 1)
     throughput_shard = tps / shards if shards > 0 else 0.0
@@ -982,6 +964,86 @@ def main():
         f"{float(args.blocktime):.1f}"
     )
 
+    PAPER_CSV_HEADER = [
+    "currency",
+    "nodes",
+    "wallets",
+    "miners",
+    "transactions",
+    "interval",
+    "shards",
+    "average block time",
+    "block size",
+    "messages",
+    "mode",
+    "tps",
+    "no. of blocks generated",
+]
+
+    def upsert_paper_csv_row(results_path: str, row: dict):
+        """
+        Upsert a row into Results CSV using a composite key:
+        (currency, shards, block size, mode)
+
+        If a matching row exists, replace it; otherwise append.
+        """
+        path = Path(results_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        key_fields = ["currency", "shards", "block size", "mode"]
+        def row_key(r: dict):
+            return tuple(str(r.get(k, "")) for k in key_fields)
+
+        rows = []
+        if path.exists() and path.stat().st_size > 0:
+            with path.open("r", newline="") as f:
+                reader = csv.DictReader(f)
+                # If file already exists but header differs, we still read what we can.
+                for r in reader:
+                    rows.append(r)
+
+        new_key = row_key(row)
+        replaced = False
+        for i, r in enumerate(rows):
+            if row_key(r) == new_key:
+                rows[i] = {**r, **row}  # preserve any extra existing columns if present
+                replaced = True
+                break
+        if not replaced:
+            rows.append(row)
+
+        # Always write in your exact preferred header order
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=PAPER_CSV_HEADER, extrasaction="ignore")
+            writer.writeheader()
+            for r in rows:
+                writer.writerow({k: r.get(k, "") for k in PAPER_CSV_HEADER})
+    # ===== Paper-style CSV row (matches your existing files) =====
+    paper_row = {
+        "currency": currency,
+        "nodes": int(args.nodes or 0),
+        "wallets": int(args.wallets or 0),
+        "miners": int(args.miners or 0),
+        "transactions": int(args.transactions or 0),
+        "interval": float(args.interval or 0.0),
+        "shards": int(shards),
+        "average block time": float(avg_bt),
+        "block size": int(block_size_tx),
+        "messages": int(msgs),
+        "mode": mode,
+        "tps": float(tps),
+        "no. of blocks generated": int(blocks),
+    }
+
+    print("\n===== PAPER CSV Row =====")
+    print(",".join(PAPER_CSV_HEADER))
+    print(",".join(str(paper_row[h]) for h in PAPER_CSV_HEADER))
+
+    # Write/Upsert into Results/<results_csv> if provided (via CLI or config)
+    if getattr(args, "results_csv", ""):
+        out_path = str(Path(args.results_dir) / args.results_csv)
+        upsert_paper_csv_row(out_path, paper_row)
+        print(f"Wrote Results row -> {out_path}")
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 {
-  "currency": "near_s9_4k",
+  "currency": "near",
   "nodes": 1000,
   "neighbors": 500,
   "miners": 1000,
@@ -29,5 +29,7 @@
   "no_metronome": false,
   "leader_metronome": true,
   "verify_mode": "shard",
-  "near_realistic": false
+  "near_realistic": false,
+  "results_csv": "Near.csv",
+  "results_dir": "Results"
 }

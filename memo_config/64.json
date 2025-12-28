@@ -1,5 +1,5 @@
 {
-  "currency": "memo_metronome_s1",
+  "currency": "memo",
   "nodes": 1000,
   "neighbors": 500,
   "blocktime": 3.2,
@@ -25,5 +25,7 @@
   "prefill": true,
   "leader_metronome": true,
   "no_metronome": false,
-  "verify_mode": "shard"
+  "verify_mode": "shard",
+  "results_dir": "Results",
+  "results_csv": "memo_results.csv"
 }

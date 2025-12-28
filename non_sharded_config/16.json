@@ -1,5 +1,5 @@
 {
-  "currency": "doge_like_s16",
+  "currency": "doge",
   "nodes": 1000,
   "neighbors": 500,
   "blocktime": 1.171875,
@@ -24,5 +24,7 @@
   "msg_proc_ms": 0.05,
   "prefill": true,
   "leader_metronome": false,
-  "no_metronome": false
+  "no_metronome": false,
+  "results_csv": "non-sharded.csv",
+  "results_dir": "Results"
 }
