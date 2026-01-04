@@ -191,38 +191,6 @@ Parallel runner script knobs (edit inside the runner file):
 
 ---
 
-## Local vs WAN comparison: plotting into separate folders (MEMO only)
-
-Use this when you have **two MEMO result CSVs** (e.g., one from a LOCAL server run and one from a WAN run) and you want the plots separated.
-
-Expected inputs:
-- `Results/memo_local.csv`
-- `Results/memo_wan.csv`
-
-Outputs:
-- `memo_graphs/local/`
-- `memo_graphs/wan/`
-
-```bash
-# MEMO - LOCAL
-python3 make_graphs.py \
-  --results_dir Results \
-  --memo_csv memo_local.csv \
-  --memo_out memo_graphs/local \
-  --skip_near --skip_non --skip_validation \
-  --no_show
-
-# MEMO - WAN
-python3 make_graphs.py \
-  --results_dir Results \
-  --memo_csv memo_wan.csv \
-  --memo_out memo_graphs/wan \
-  --skip_near --skip_non --skip_validation \
-  --no_show
-```
-
----
-
 ## Plot generation (`make_graphs.py`)
 
 What it does:
@@ -265,6 +233,38 @@ Examples:
 python3 make_graphs.py --no_show
 python3 make_graphs.py --skip_validation --no_show
 python3 make_graphs.py --near_csv Near.csv --near_out near_graphs --no_show
+```
+
+---
+
+## Local vs WAN comparison: plotting into separate folders (MEMO only)
+
+Use this when you have **two MEMO result CSVs** (e.g., one from a LOCAL server run and one from a WAN run) and you want the plots separated.
+
+Expected inputs:
+- `Results/memo_local.csv`
+- `Results/memo_wan.csv`
+
+Outputs:
+- `memo_graphs/local/`
+- `memo_graphs/wan/`
+
+```bash
+# MEMO - LOCAL
+python3 make_graphs.py \
+  --results_dir Results \
+  --memo_csv memo_local.csv \
+  --memo_out memo_graphs/local \
+  --skip_near --skip_non --skip_validation \
+  --no_show
+
+# MEMO - WAN
+python3 make_graphs.py \
+  --results_dir Results \
+  --memo_csv memo_wan.csv \
+  --memo_out memo_graphs/wan \
+  --skip_near --skip_non --skip_validation \
+  --no_show
 ```
 
 ---
