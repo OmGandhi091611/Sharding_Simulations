@@ -118,7 +118,7 @@ Note: some keys may differ slightly between experiment families. Always check yo
 
 ### Results output (where CSV rows go)
 - `results_dir` — directory where CSV results are written (recommended: `Results`); change to redirect output where you want to store your results.
-- `results_csv` — filename inside `results_dir` (e.g., `non-sharded.csv`, `Near.csv`, `memo_results.csv`); change to route output into a specific CSV and a new name will create that named csv file in the Results folder.
+- `results_csv` — filename inside `results_dir` (e.g., `non-sharded.csv`, `Near.csv`, `memo_results.csv`); change to route output into a specific CSV (a new name creates a new CSV inside `Results/`).
 
 Mode convention in CSV output:
 - if `shards == 1` → `mode = conventional`
@@ -133,7 +133,7 @@ Goal: run the *same* workload twice:
 - **WAN** (higher `rtt_ms`, lower bandwidth)
 
 ### Step 1: Make sure LOCAL + WAN write to different CSV files
-In your JSON config(s), set different `results_csv` values so runs don’t overwrite each other. :contentReference[oaicite:2]{index=2}
+In your JSON config(s), set different `results_csv` values so runs don’t overwrite each other.
 
 Example:
 - Local configs:  `results_csv: "memo_local.csv"`
@@ -141,15 +141,17 @@ Example:
 
 WAN knobs (typical):
 - increase `rtt_ms`
-- optionally reduce `control_bw_mbps` / `broadcast_bw_mbps` :contentReference[oaicite:3]{index=3}
+- optionally reduce `control_bw_mbps` / `broadcast_bw_mbps`
 
 ### Step 2: Run simulations (LOCAL then WAN)
+
 ```bash
 # LOCAL
 python3 simulation.py --config memo_config/<LOCAL_CONFIG>.json
 
 # WAN
 python3 simulation.py --config memo_config/<WAN_CONFIG>.json
+```
 
 ---
 
@@ -189,55 +191,6 @@ Parallel runner script knobs (edit inside the runner file):
 
 ---
 
-## Plot generation (`graph.py`)
-
-What it does:
-- reads CSVs from `Results/`
-- writes graphs directly into:
-  - `non_sharded_graphs/`
-  - `near_graphs/`
-  - `memo_graphs/`
-  - `Validations/`
-- If provided with new name in the output then it will create a directory with that name
-- does not create any extra `plots/` directory
-
-Run it:
-
-```bash
-python3 graph.py --results_dir Results --no_show
-```
-
-### Graph script arguments explained
-
-Inputs:
-- `--results_dir` — folder containing CSVs (default: `Results`); change if your results folder differs.
-- `--near_csv` — NEAR results filename inside `Results/` (default: `Near.csv`).
-- `--memo_csv` — MEMO results filename inside `Results/` (default: `memo_results.csv`).
-- `--non_csv` — non-sharded results filename inside `Results/` (default: `non-sharded.csv`).
-- `--validation_csv` — validation results filename inside `Results/` (default: `Validation.csv`).
-
-Outputs:
-- `--near_out` — output folder for NEAR figures (default: `near_graphs`).
-- `--memo_out` — output folder for MEMO figures (default: `memo_graphs`).
-- `--non_out` — output folder for non-sharded figures (default: `non_sharded_graphs`).
-- `--val_out` — output folder for validation figures (default: `Validations`).
-
-Display + selection:
-- `--no_show` — don’t display plots (save only); recommended on servers/Colab.
-- `--skip_near` — skip generating the plots for the NEAR blockchain simulation results.
-- `--skip_non` — skip generating the plots for the non-sharded blockchains' simulations results.
-- `--skip_memo` — skip generating the plots for the memo blockchain simulation results 
-- `--skip_validation` — skip genearting the plots for the conventional chains to confirm that the simulator tool works correctly.
-
-Examples:
-
-```bash
-python3 graph.py --no_show
-python3 graph.py --skip_validation --no_show
-python3 graph.py --near_csv Near.csv --near_out near_graphs --no_show
-```
----
-
 ## Local vs WAN comparison: plotting into separate folders (MEMO only)
 
 Use this when you have **two MEMO result CSVs** (e.g., one from a LOCAL server run and one from a WAN run) and you want the plots separated.
@@ -266,6 +219,53 @@ python3 make_graphs.py \
   --memo_out memo_graphs/wan \
   --skip_near --skip_non --skip_validation \
   --no_show
+```
+
+---
+
+## Plot generation (`make_graphs.py`)
+
+What it does:
+- reads CSVs from `Results/`
+- writes graphs directly into:
+  - `non_sharded_graphs/`
+  - `near_graphs/`
+  - `memo_graphs/`
+  - `Validations/`
+- does not create any extra `plots/` directory
+
+Run it:
+
+```bash
+python3 make_graphs.py --results_dir Results --no_show
+```
+
+### Graph script arguments explained
+
+Inputs:
+- `--results_dir` — folder containing CSVs (default: `Results`); change if your results folder differs.
+- `--near_csv` — NEAR results filename inside `Results/` (default: `Near.csv`).
+- `--memo_csv` — MEMO results filename inside `Results/` (default: `memo_results.csv`).
+- `--non_csv` — non-sharded results filename inside `Results/` (default: `non-sharded.csv`).
+- `--validation_csv` — validation results filename inside `Results/` (default: `Validation.csv`).
+
+Outputs:
+- `--near_out` — output folder for NEAR figures (default: `near_graphs`).
+- `--memo_out` — output folder for MEMO figures (default: `memo_graphs`).
+- `--non_out` — output folder for non-sharded figures (default: `non_sharded_graphs`).
+- `--val_out` — output folder for validation figures (default: `Validations`).
+
+Display + selection:
+- `--no_show` — don’t display plots (save only); recommended on servers/Colab.
+- `--skip_near` / `--skip_memo` / `--skip_non` / `--skip_validation` — skip generating that plot category.
+
+Examples:
+
+```bash
+python3 make_graphs.py --no_show
+python3 make_graphs.py --skip_validation --no_show
+python3 make_graphs.py --near_csv Near.csv --near_out near_graphs --no_show
+```
 
 ---
 
@@ -284,7 +284,7 @@ Rules:
 - bubble size: `tps`
 - MEMO series: uses `currency == "memo"` filtered to `shards == 1` (currency stays `memo`)
 
-Even with identical CSV values, plots can look slightly different across Colab vs local due to matplotlib backends/fonts/DPI. For consistent visuals, pin versions and set explicit DPI/font in the plot script.
+Even with identical CSV values, plots may look slightly different across machines due to matplotlib backends/fonts/DPI. For consistent visuals, pin versions and set explicit DPI/font in the plot script.
 
 ---
 
