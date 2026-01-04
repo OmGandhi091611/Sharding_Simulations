@@ -117,12 +117,39 @@ Note: some keys may differ slightly between experiment families. Always check yo
 - `print_int` — how often the simulator prints progress stats; increase to reduce log spam.
 
 ### Results output (where CSV rows go)
-- `results_dir` — directory where CSV results are written (recommended: `Results`); change to redirect output.
-- `results_csv` — filename inside `results_dir` (e.g., `non-sharded.csv`, `Near.csv`, `memo_results.csv`); change to route output into a specific CSV.
+- `results_dir` — directory where CSV results are written (recommended: `Results`); change to redirect output where you want to store your results.
+- `results_csv` — filename inside `results_dir` (e.g., `non-sharded.csv`, `Near.csv`, `memo_results.csv`); change to route output into a specific CSV and a new name will create that named csv file in the Results folder.
 
 Mode convention in CSV output:
 - if `shards == 1` → `mode = conventional`
 - if `shards > 1` → `mode = sharded`
+
+---
+
+## Local vs WAN comparison (server vs wide-area network)
+
+Goal: run the *same* workload twice:
+- **LOCAL** (low latency / high bandwidth)
+- **WAN** (higher `rtt_ms`, lower bandwidth)
+
+### Step 1: Make sure LOCAL + WAN write to different CSV files
+In your JSON config(s), set different `results_csv` values so runs don’t overwrite each other. :contentReference[oaicite:2]{index=2}
+
+Example:
+- Local configs:  `results_csv: "memo_local.csv"`
+- WAN configs:    `results_csv: "memo_wan.csv"`
+
+WAN knobs (typical):
+- increase `rtt_ms`
+- optionally reduce `control_bw_mbps` / `broadcast_bw_mbps` :contentReference[oaicite:3]{index=3}
+
+### Step 2: Run simulations (LOCAL then WAN)
+```bash
+# LOCAL
+python3 simulation.py --config memo_config/<LOCAL_CONFIG>.json
+
+# WAN
+python3 simulation.py --config memo_config/<WAN_CONFIG>.json
 
 ---
 
@@ -171,12 +198,13 @@ What it does:
   - `near_graphs/`
   - `memo_graphs/`
   - `Validations/`
+- If provided with new name in the output then it will create a directory with that name
 - does not create any extra `plots/` directory
 
 Run it:
 
 ```bash
-python3 make_graphs.py --results_dir Results --no_show
+python3 graph.py --results_dir Results --no_show
 ```
 
 ### Graph script arguments explained
@@ -196,7 +224,10 @@ Outputs:
 
 Display + selection:
 - `--no_show` — don’t display plots (save only); recommended on servers/Colab.
-- `--skip_near` / `--skip_memo` / `--skip_non` / `--skip_validation` — skip generating that plot category.
+- `--skip_near` — skip generating the plots for the NEAR blockchain simulation results.
+- `--skip_non` — skip generating the plots for the non-sharded blockchains' simulations results.
+- `--skip_memo` — skip generating the plots for the memo blockchain simulation results 
+- `--skip_validation` — skip genearting the plots for the conventional chains to confirm that the simulator tool works correctly.
 
 Examples:
 
@@ -205,6 +236,36 @@ python3 graph.py --no_show
 python3 graph.py --skip_validation --no_show
 python3 graph.py --near_csv Near.csv --near_out near_graphs --no_show
 ```
+---
+
+## Local vs WAN comparison: plotting into separate folders (MEMO only)
+
+Use this when you have **two MEMO result CSVs** (e.g., one from a LOCAL server run and one from a WAN run) and you want the plots separated.
+
+Expected inputs:
+- `Results/memo_local.csv`
+- `Results/memo_wan.csv`
+
+Outputs:
+- `memo_graphs/local/`
+- `memo_graphs/wan/`
+
+```bash
+# MEMO - LOCAL
+python3 make_graphs.py \
+  --results_dir Results \
+  --memo_csv memo_local.csv \
+  --memo_out memo_graphs/local \
+  --skip_near --skip_non --skip_validation \
+  --no_show
+
+# MEMO - WAN
+python3 make_graphs.py \
+  --results_dir Results \
+  --memo_csv memo_wan.csv \
+  --memo_out memo_graphs/wan \
+  --skip_near --skip_non --skip_validation \
+  --no_show
 
 ---
 
@@ -243,7 +304,7 @@ MIT is a common choice for research code. Add a `LICENSE` file if you want a sta
 
 ---
 
-## Citation
+## Citation (For now)
 
 If you use this simulator in a report/paper, cite as:
 
