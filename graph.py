@@ -126,92 +126,110 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 #    (BTC/BCH/LTC/DOGE vs MEMO, S=1)
 # ----------------------------
 def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, show: bool):
+    # BTC-only bubble chart:
+    #   x = block size (tx per block)
+    #   y = average block time (s)
+    #   bubble size ∝ TPS
+
     if not os.path.exists(non_csv):
         print(f"[skip] non-sharded CSV not found: {non_csv}")
         return
-    if not os.path.exists(memo_csv):
-        print(f"[skip] memo CSV not found: {memo_csv}")
+
+    # Robust CSV read (your file has inconsistent header/columns)
+    df = pd.read_csv(non_csv, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    # Normalize column name variants
+    def pick_col(candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    c_currency = pick_col(["currency"])
+    c_bs      = pick_col(["block size", "block_size", "blocksize"])
+    c_abt     = pick_col(["average block time", "avg block time", "avg_block_time"])
+    c_tps     = pick_col(["tps"])
+
+    missing = []
+    if c_currency is None: missing.append("currency")
+    if c_bs is None:      missing.append("block size")
+    if c_abt is None:     missing.append("average block time")
+    if c_tps is None:     missing.append("tps")
+
+    if missing:
+        print(f"[skip] non-sharded CSV missing required columns: {missing}")
+        print("Columns seen:", df.columns.tolist())
         return
 
-    df_base = pd.read_csv(non_csv)
-    df_memo = pd.read_csv(memo_csv)
+    # Clean currency + filter btc_hypothetical
+    df[c_currency] = (
+        df[c_currency]
+        .astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.lower()
+        .str.strip()
+    )
 
-    df_base = ensure_lower_currency(df_base)
-    df_memo = ensure_lower_currency(df_memo)
-
-    ensure_numeric(df_base, ["block size", "average block time", "tps"])
-    ensure_numeric(df_memo, ["block size", "average block time", "tps", "shards"])
-
-    keep = {"btc", "bch", "ltc", "doge"}
-    df_base = df_base[df_base["currency"].isin(keep)].copy()
-
-    # Normalize block size to int (stable mapping)
-    df_base["bs"] = df_base["block size"].apply(lambda x: int(float(x)) if pd.notna(x) else np.nan)
-    df_memo["bs"] = df_memo["block size"].apply(lambda x: int(float(x)) if pd.notna(x) else np.nan)
-
-    # X axis categories ONLY from non-sharded
-    base_block_sizes = sorted(df_base["bs"].dropna().unique().tolist())
-    if not base_block_sizes:
-        print("[skip] non-sharded CSV has no valid block sizes")
-        return
-
-    # MEMO S=1 (keep currency label as memo)
-    df_memo_s1 = df_memo[(df_memo["currency"] == "memo") & (df_memo["shards"] == 1)].copy()
-    df_memo_s1 = df_memo_s1[df_memo_s1["bs"].isin(base_block_sizes)].copy()
-
-    df_base = df_base[["currency", "bs", "average block time", "tps"]].copy()
-    df_memo_s1 = df_memo_s1[["currency", "bs", "average block time", "tps"]].copy()
-
-    df = pd.concat([df_base, df_memo_s1], ignore_index=True)
-    df = df.dropna(subset=["currency", "bs", "average block time", "tps"])
+    df = df[df[c_currency].eq("btc_hypothetical")].copy()
     if df.empty:
-        print("[skip] bubble plot has no data after filtering")
+        print("[skip] non-sharded CSV has no rows for btc_hypothetical")
+        print("Currencies seen:", sorted(df[c_currency].dropna().unique().tolist())[:20])
         return
 
-    # Categorical x positions spaced by 2
+    # Numeric coercion
+    df[c_bs]  = pd.to_numeric(df[c_bs], errors="coerce")
+    df[c_abt] = pd.to_numeric(df[c_abt], errors="coerce")
+    df[c_tps] = pd.to_numeric(df[c_tps], errors="coerce")
+
+    df = df.dropna(subset=[c_bs, c_abt, c_tps])
+    if df.empty:
+        print("[skip] BTC bubble plot has no usable rows after numeric coercion")
+        return
+
+    # Normalize block size to int
+    df["bs"] = df[c_bs].astype(float).round().astype(int)
+
+    base_block_sizes = sorted(df["bs"].unique().tolist())
+    if not base_block_sizes:
+        print("[skip] BTC data has no valid block sizes")
+        return
+
+    # Categorical x positions spaced by 2 (same style)
     x_positions = {bs: i * 2 for i, bs in enumerate(base_block_sizes)}
     xticks = [x_positions[bs] for bs in base_block_sizes]
     xticklabels = [str(bs) for bs in base_block_sizes]
 
-    # IMPORTANT: bubble area proportional to TPS (classic bubble chart)
-    max_tps = float(df["tps"].max()) if float(df["tps"].max()) > 0 else 1.0
-    target_max_area = 1600.0  # tweak if you want bigger/smaller bubbles
+    # Bubble area proportional to TPS (same style)
+    max_tps = float(df[c_tps].max()) if float(df[c_tps].max()) > 0 else 1.0
+    target_max_area = 1600.0
     scale = target_max_area / max_tps
-
-    min_area = 60.0  # ensures tiny TPS still visible
+    min_area = 60.0
 
     plt.figure(figsize=(12, 7))
 
-    # Draw order affects overlap — keep it fixed
-    order = ["btc", "bch", "ltc", "doge", "memo"]
-    for chain in order:
-        if chain not in set(df["currency"]):
-            continue
+    sub = df.sort_values("bs")
+    x = np.array([x_positions[int(v)] for v in sub["bs"].to_numpy(dtype=float)], dtype=float)
+    y = sub[c_abt].to_numpy(dtype=float)
+    s = (sub[c_tps].to_numpy(dtype=float) * scale) + min_area
 
-        sub = df[df["currency"] == chain].copy().sort_values("bs")
-        x = np.array([x_positions[int(v)] for v in sub["bs"].to_numpy(dtype=float)], dtype=float)
-        y = sub["average block time"].to_numpy(dtype=float)
-
-        # area ∝ TPS
-        s = (sub["tps"].to_numpy(dtype=float) * scale) + min_area
-
-        plt.scatter(
-            x, y,
-            s=s,
-            alpha=0.6,
-            label=chain,
-            edgecolors="black",
-            linewidth=0.7,
-        )
+    plt.scatter(
+        x, y,
+        s=s,
+        alpha=0.6,
+        label="btc_hypothetical",
+        edgecolors="black",
+        linewidth=0.7,
+    )
 
     plt.xticks(xticks, xticklabels, rotation=45)
     plt.xlabel("Block size (transactions per block)")
     plt.ylabel("Average block time (s)")
-    plt.title("TPS as Bubble Size over Block Size vs Average Block Time\n(BTC/BCH/LTC/DOGE vs MEMO, S=1)")
+    plt.title("TPS as Bubble Size over Block Size vs Average Block Time (BTC hypothetical)")
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend(title="Chain", loc="upper left")
 
-    savefig(outdir, "bubble_tps_blocktime_vs_blocksize_nonsharded_vs_memo_s1.png")
+    savefig(outdir, "bubble_tps_blocktime_vs_blocksize_btc_hypothetical.png")
     if show:
         plt.show()
     else:

@@ -12,13 +12,17 @@ from typing import Dict, Any, Optional, List, Tuple
 SIM_SCRIPT = "simulation.py"   # change if your file is named differently
 
 CONFIGS = {
-    "doge_like_s1": "non_sharded_config/1.json",
-    "doge_like_s2": "non_sharded_config/2.json",
-    "doge_like_s4": "non_sharded_config/4.json",
-    "doge_like_s6": "non_sharded_config/6.json",
-    "doge_like_s8": "non_sharded_config/8.json",
-    "doge_like_s9": "non_sharded_config/9.json",
-    "doge_like_s16": "non_sharded_config/16.json",
+    "btc_hypothetical_s1": "non_sharded_config/1.json",
+    "btc_hypothetical_s2": "non_sharded_config/2.json",
+    "btc_hypothetical_s4": "non_sharded_config/4.json",
+    "btc_hypothetical_s6": "non_sharded_config/6.json",
+    "btc_hypothetical_s8": "non_sharded_config/8.json",
+    "btc_hypothetical_s9": "non_sharded_config/9.json",
+    "btc_hypothetical_s16": "non_sharded_config/16.json",
+    "btc_hypothetical_s32": "non_sharded_config/32.json",
+    "btc_hypothetical_s64": "non_sharded_config/64.json",
+    "btc_hypothetical_s128": "non_sharded_config/128.json",
+    "btc_hypothetical_s256": "non_sharded_config/256.json",
 }
 
 LOG_DIR = "non_sharded_logs"

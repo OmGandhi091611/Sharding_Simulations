@@ -2,7 +2,7 @@
   "currency": "btc_hypothetical",
   "nodes": 1000,
   "neighbors": 500,
-  "blocktime": 240,
+  "blocktime": 120,
   "miners": 1000,
   "hashrate": 1000000.0,
   "wallets": 1000,

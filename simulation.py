@@ -978,6 +978,7 @@ def main():
     "mode",
     "tps",
     "no. of blocks generated",
+    "blocktime in configuration file"
 ]
 
     def upsert_paper_csv_row(results_path: str, row: dict):
@@ -990,7 +991,8 @@ def main():
         path = Path(results_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        key_fields = ["currency", "shards", "block size", "mode"]
+        # key_fields = ["currency", "shards", "block size", "mode"]
+        key_fields = ["currency", "shards", "block size", "mode", "blocktime in configuration file"]
         def row_key(r: dict):
             return tuple(str(r.get(k, "")) for k in key_fields)
 
@@ -1033,6 +1035,7 @@ def main():
         "mode": mode,
         "tps": float(tps),
         "no. of blocks generated": int(blocks),
+        "blocktime in configuration file": int(args.blocktime),
     }
 
     print("\n===== PAPER CSV Row =====")
