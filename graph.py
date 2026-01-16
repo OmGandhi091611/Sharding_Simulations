@@ -73,7 +73,7 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
         "btc":  {"name": "Bitcoin",      "tps": 7.0,   "avg_block_time": 600.0},
         "bch":  {"name": "Bitcoin Cash", "tps": 200.0, "avg_block_time": 600.0},
         "ltc":  {"name": "Litecoin",     "tps": 28.0,  "avg_block_time": 150.0},
-        "doge": {"name": "Dogecoin",     "tps": 33.0,  "avg_block_time": 60.0},
+        "doge": {"name": "Dogecoin",     "tps": 40.0,  "avg_block_time": 60.0},
     }
 
     def attach_real(row):
@@ -278,11 +278,12 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
         ax0 = axes[0]
         ax0.bar(x, tps, width=width)
+        ax0.bar(x, tps, width=width, color="#1f77b4")
         ax0.set_xticks(x)
         ax0.set_xticklabels([str(int(s)) for s in shards])
         ax0.set_xlabel("Shards")
         ax0.set_ylabel("TPS (log scale)")
-        ax0.set_title(f"MEMO: TPS vs Shards\n(block size = {bs})")
+        ax0.set_title(f"TPS")
         ax0.set_yscale("log")
         ax0.set_ylim(tps_ymin, tps_ymax)
         ax0.set_yticks([10.0**e for e in tps_exps])
@@ -291,11 +292,12 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
         ax1 = axes[1]
         ax1.bar(x, msgs, width=width)
+        ax1.bar(x, msgs, width=width, color="#ff7f0e")
         ax1.set_xticks(x)
         ax1.set_xticklabels([str(int(s)) for s in shards])
         ax1.set_xlabel("Shards")
         ax1.set_ylabel("Messages (log scale)")
-        ax1.set_title(f"MEMO: Messages vs Shards\n(block size = {bs})")
+        ax1.set_title(f"Messages")
         ax1.set_yscale("log")
         ax1.set_ylim(msg_ymin, msg_ymax)
         ax1.set_yticks([10.0**e for e in msg_exps])
@@ -304,11 +306,12 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
         ax2 = axes[2]
         ax2.bar(x, bt, width=width)
+        ax2.bar(x, bt, width=width, color="#2ca02c")
         ax2.set_xticks(x)
         ax2.set_xticklabels([str(int(s)) for s in shards])
         ax2.set_xlabel("Shards")
         ax2.set_ylabel("Average Block Time (s, log scale)")
-        ax2.set_title(f"MEMO: Block Time vs Shards\n(block size = {bs})")
+        ax2.set_title(f"Block Time")
         ax2.set_yscale("log")
         ax2.set_ylim(bt_ymin, bt_ymax)
         ax2.set_yticks([10.0**e for e in bt_exps])
