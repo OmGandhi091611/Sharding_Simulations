@@ -9,6 +9,8 @@ Reads CSVs from Results/ (same level as graph folders) and writes plots to:
   - Validations/
 
 No cross_compare_graphs. No extra "plots/" folder.
+
+Update: Bubble chart now labels ONLY TPS for the 4 corner bubbles.
 """
 
 import argparse
@@ -122,8 +124,8 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 
 
 # ----------------------------
-# 2) NEW Bubble chart -> non_sharded_graphs/
-#    (BTC/BCH/LTC/DOGE vs MEMO, S=1)
+# 2) Bubble chart -> non_sharded_graphs/
+#    (BTC hypothetical; label 4 corner bubbles with ONLY TPS)
 # ----------------------------
 def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, show: bool):
     # BTC-only bubble chart:
@@ -135,7 +137,7 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         print(f"[skip] non-sharded CSV not found: {non_csv}")
         return
 
-    # Robust CSV read (your file has inconsistent header/columns)
+    # Robust CSV read (your file may have inconsistent header/columns)
     df = pd.read_csv(non_csv, engine="python", on_bad_lines="warn")
     df.columns = [str(c).strip().lower() for c in df.columns]
 
@@ -195,12 +197,12 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         print("[skip] BTC data has no valid block sizes")
         return
 
-    # Categorical x positions spaced by 2 (same style)
+    # Categorical x positions spaced by 2
     x_positions = {bs: i * 2 for i, bs in enumerate(base_block_sizes)}
     xticks = [x_positions[bs] for bs in base_block_sizes]
     xticklabels = [str(bs) for bs in base_block_sizes]
 
-    # Bubble area proportional to TPS (same style)
+    # Bubble area proportional to TPS
     max_tps = float(df[c_tps].max()) if float(df[c_tps].max()) > 0 else 1.0
     target_max_area = 1600.0
     scale = target_max_area / max_tps
@@ -208,7 +210,7 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
 
     plt.figure(figsize=(12, 7))
 
-    sub = df.sort_values("bs")
+    sub = df.sort_values("bs").copy()
     x = np.array([x_positions[int(v)] for v in sub["bs"].to_numpy(dtype=float)], dtype=float)
     y = sub[c_abt].to_numpy(dtype=float)
     s = (sub[c_tps].to_numpy(dtype=float) * scale) + min_area
@@ -222,6 +224,52 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         linewidth=0.7,
     )
 
+    # ----------------------------
+    # Annotate 4 corner bubbles with ONLY TPS
+    # ----------------------------
+    bs_min = int(sub["bs"].min())
+    bs_max = int(sub["bs"].max())
+
+    def fmt_float(v, nd=0):
+        try:
+            return f"{float(v):.{nd}f}"
+        except Exception:
+            return str(v)
+
+    def annotate_row(row, title=None, dx=0.8, dy=0.0):
+        xi = float(x_positions[int(row["bs"])])
+        yi = float(row[c_abt])
+        tps_val = row[c_tps]
+
+        label = f"TPS={fmt_float(tps_val, 0)}" if not title else f"{title}\nTPS={fmt_float(tps_val, 0)}"
+
+        plt.annotate(
+            label,
+            xy=(xi, yi),
+            xytext=(xi + dx, yi + dy),
+            textcoords="data",
+            fontsize=10,
+            ha="left",
+            va="center",
+            arrowprops=dict(arrowstyle="->", lw=1.0),
+        )
+
+    # For smallest block size: label lowest BT and highest BT
+    sub_min = sub[sub["bs"] == bs_min]
+    if not sub_min.empty:
+        r_min_bt = sub_min.loc[sub_min[c_abt].idxmin()]
+        r_max_bt = sub_min.loc[sub_min[c_abt].idxmax()]
+        annotate_row(r_min_bt, dx=0.8)
+        annotate_row(r_max_bt, dx=0.8)
+
+    # For largest block size: label lowest BT and highest BT
+    sub_max = sub[sub["bs"] == bs_max]
+    if not sub_max.empty:
+        r_min_bt = sub_max.loc[sub_max[c_abt].idxmin()]
+        r_max_bt = sub_max.loc[sub_max[c_abt].idxmax()]
+        annotate_row(r_min_bt, dx=0.8)
+        annotate_row(r_max_bt, dx=0.8)
+
     plt.xticks(xticks, xticklabels, rotation=45)
     plt.xlabel("Block size (transactions per block)")
     plt.ylabel("Average block time (s)")
@@ -234,6 +282,7 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         plt.show()
     else:
         plt.close()
+
 
 # ----------------------------
 # 3) MEMO per-blocksize bar panels -> memo_graphs/
@@ -295,13 +344,12 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
         ax0 = axes[0]
-        ax0.bar(x, tps, width=width)
         ax0.bar(x, tps, width=width, color="#1f77b4")
         ax0.set_xticks(x)
         ax0.set_xticklabels([str(int(s)) for s in shards])
         ax0.set_xlabel("Shards")
         ax0.set_ylabel("TPS (log scale)")
-        ax0.set_title(f"TPS")
+        ax0.set_title("TPS")
         ax0.set_yscale("log")
         ax0.set_ylim(tps_ymin, tps_ymax)
         ax0.set_yticks([10.0**e for e in tps_exps])
@@ -309,13 +357,12 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
         ax0.grid(axis="y", linestyle="--", alpha=0.4, which="both")
 
         ax1 = axes[1]
-        ax1.bar(x, msgs, width=width)
         ax1.bar(x, msgs, width=width, color="#ff7f0e")
         ax1.set_xticks(x)
         ax1.set_xticklabels([str(int(s)) for s in shards])
         ax1.set_xlabel("Shards")
         ax1.set_ylabel("Messages (log scale)")
-        ax1.set_title(f"Messages")
+        ax1.set_title("Messages")
         ax1.set_yscale("log")
         ax1.set_ylim(msg_ymin, msg_ymax)
         ax1.set_yticks([10.0**e for e in msg_exps])
@@ -323,13 +370,12 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
         ax1.grid(axis="y", linestyle="--", alpha=0.4, which="both")
 
         ax2 = axes[2]
-        ax2.bar(x, bt, width=width)
         ax2.bar(x, bt, width=width, color="#2ca02c")
         ax2.set_xticks(x)
         ax2.set_xticklabels([str(int(s)) for s in shards])
         ax2.set_xlabel("Shards")
         ax2.set_ylabel("Average Block Time (s, log scale)")
-        ax2.set_title(f"Block Time")
+        ax2.set_title("Block Time")
         ax2.set_yscale("log")
         ax2.set_ylim(bt_ymin, bt_ymax)
         ax2.set_yticks([10.0**e for e in bt_exps])
@@ -362,7 +408,7 @@ def run_near_vs_targets(near_csv: str, outdir: str, show: bool):
 
     df_near = df_near.sort_values("shards")
 
-    # Your targets (edit if needed)
+    # Your targets (edit as needed)
     near_targets = {
         4: {"tps": 3000.0, "avg_block_time": 0.6},
         6: {"tps": 3500.0, "avg_block_time": 0.6},
