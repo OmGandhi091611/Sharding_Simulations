@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+"""
+Winner-based sharding simulator (SimPy)
+
+Key performance fixes included:
+  1) Pool is O(1): default pool_mode="count" (no list pop(0)).
+  2) Aggregate tx arrivals: one process instead of per-wallet processes.
+  3) No background token-bucket refill loop (removes tons of events).
+  4) Propagation model switch:
+       - exact   : explicit neighbor flooding (slow for big N/degree)
+       - gossip  : bounded fanout + rounds (much faster)
+       - analytic: O(1) broadcast approximation (fastest)
+  5) Neighbor generation avoids O(N^2) list rebuilds.
+
+Default behavior remains similar, but you now control scalability knobs via CLI.
+
+Example fast runs:
+  ./sim.py --nodes 2000 --neighbors 50 --miners 2000 --hashrate 1e6 \
+           --wallets 2000 --transactions 2000 --interval 1 \
+           --shards 64 --total-blocksize 120000 --blocks 1000 \
+           --prop_model analytic --pool_mode count --quiet_blocks
+"""
+
 import simpy
 import argparse
 import random
@@ -6,6 +28,10 @@ import json
 import os
 import csv
 from pathlib import Path
+from collections import deque
+from typing import Optional, Deque, Tuple, List
+from typing import Generator
+from simpy.events import Event
 
 
 # ============================================================
@@ -15,7 +41,14 @@ network_data = 0      # bytes of block data sent
 io_requests = 0       # number of block sends (edges)
 total_tx = 0          # total transactions (including coinbase)
 total_coins = 0.0     # minted coins
-pool = []             # (wallet_id, timestamp)
+
+# Pool modeling:
+# - count mode: integer count of pending tx (fastest)
+# - deque mode: stores (wallet_id, timestamp) FIFO (still fast with popleft)
+POOL_MODE = "count"     # "count" or "deque"
+pool_count = 0          # used when POOL_MODE == "count"
+pool_deque: Deque[Tuple[int, float]] = deque()  # used when POOL_MODE == "deque"
+
 sim_summary = {}      # final compact summary
 
 HEADER_SIZE = 1024
@@ -23,13 +56,19 @@ YEAR = 365 * 24 * 3600
 
 # Network model knobs (set from CLI)
 LINK_RTT_MS = 0.0       # logical RTT
-LINK_JITTER_MS = 0.0    # extra jitter
+LINK_JITTER_MS = 0.0    # extra jitter (one-way)
 LINK_MSG_PROC_MS = 0.0  # CPU per received message
 CTRL_BW_MBPS = 0.0      # control NIC throughput
 DATA_BW_MBPS = 0.0      # block NIC throughput
 
-# Token bucket for block (data-plane) bandwidth
-DATA_TOKENS = None      # simpy.Container of "bytes"
+# Propagation model
+PROP_MODEL = "exact"    # exact | gossip | analytic
+GOSSIP_FANOUT = 16
+GOSSIP_ROUNDS = 10
+
+# Cached for analytic propagation
+GLOBAL_N = 0
+GLOBAL_AVG_DEG = 0
 
 
 # ============================================================
@@ -87,32 +126,17 @@ def control_phase_delay(num_msgs: int, msg_size_bytes: int) -> float:
     return send_time + cpu_time + latency
 
 
-# ---------------- Token bucket for data-plane (blocks) ----------------
-def _refill_data_tokens(env: simpy.Environment, rate_Bps: float):
+def data_plane_send_delay_s(total_bytes: float) -> float:
     """
-    Background process that refills the global data NIC bucket
-    at 'rate_Bps' bytes per second.
+    Deterministic delay to send total_bytes over the data-plane NIC.
+    No token bucket (avoids tons of env events).
     """
-    global DATA_TOKENS
-    dt = 0.01  # 10 ms tick
-    while True:
-        yield env.timeout(dt)
-        DATA_TOKENS.put(rate_Bps * dt)
-
-
-def init_bandwidth_buckets(env: simpy.Environment):
-    """
-    Initialize token-bucket model for the data NIC, if DATA_BW_MBPS > 0.
-    Control-plane stays with analytic model (CTRL_BW_MBPS).
-    """
-    global DATA_TOKENS, DATA_BW_MBPS
+    if total_bytes <= 0:
+        return 0.0
     if DATA_BW_MBPS and DATA_BW_MBPS > 0:
         Bps = DATA_BW_MBPS * 1e6 / 8.0
-        # Start with one tick's worth of tokens so the first send doesn't stall.
-        DATA_TOKENS = simpy.Container(env, init=Bps * 0.01, capacity=float("inf"))
-        env.process(_refill_data_tokens(env, Bps))
-    else:
-        DATA_TOKENS = None
+        return total_bytes / max(Bps, 1e-9)
+    return 0.0
 
 
 # ============================================================
@@ -131,7 +155,7 @@ class Node:
         self.env = env
         self.id = i
         self.blocks = set()
-        self.neighbors = []
+        self.neighbors: List["Node"] = []
 
     def _recv_block(self, b: Block):
         """Per-edge link latency + jitter + per-message CPU."""
@@ -142,35 +166,124 @@ class Node:
             return
         self.blocks.add(b.id)
 
+        # In exact mode, this node will also forward via receive()
+        if PROP_MODEL == "exact":
+            self.env.process(self.receive(b))
+
+    def _gossip_round(self, frontier: List["Node"], b: Block) -> Generator[Event, None, List["Node"]]:
+        """
+        One gossip step:
+          Each node in frontier contacts up to GOSSIP_FANOUT neighbors.
+        Returns next frontier (nodes newly infected this round).
+        """
+        newly = []
+        for u in frontier:
+            # pick a bounded fanout
+            if not u.neighbors:
+                continue
+            fan = min(GOSSIP_FANOUT, len(u.neighbors))
+            picks = random.sample(u.neighbors, fan) if fan > 0 else []
+            for v in picks:
+                if b.id in v.blocks:
+                    continue
+                # receiver delay approximated once per contact
+                delay_s = sample_one_way_latency_s() + recv_processing_s()
+                yield self.env.timeout(delay_s)
+                if b.id in v.blocks:
+                    continue
+                v.blocks.add(b.id)
+                newly.append(v)
+        return newly
+
     def receive(self, b: Block):
         """
         Called when this node learns about block b.
 
-        First time:
-          * Data NIC token-limited transmission to all neighbors
-          * per-neighbor arrivals via _recv_block
-        Re-receives are ignored.
+        Propagation models:
+          - exact   : explicit flooding on the neighbor graph (slow at large N/deg)
+          - gossip  : bounded fanout + limited rounds (faster)
+          - analytic: O(1) approximation (fastest)
+
+        This function updates global network_data/io_requests for accounting.
         """
-        global network_data, io_requests, DATA_BW_MBPS, DATA_TOKENS
+        global network_data, io_requests, GLOBAL_N, GLOBAL_AVG_DEG
 
         if b.id in self.blocks:
             return
-
         self.blocks.add(b.id)
 
+        # -------------------------
+        # ANALYTIC (fastest)
+        # -------------------------
+        if PROP_MODEL == "analytic":
+            N = max(0, int(GLOBAL_N))
+            deg = max(0, int(GLOBAL_AVG_DEG))
+            total_edges = N * deg
+
+            io_requests += total_edges
+            network_data += total_edges * b.size
+
+            # One big broadcast delay: bandwidth + one-way latency + CPU
+            total_bytes = total_edges * b.size
+            delay = data_plane_send_delay_s(total_bytes) + sample_one_way_latency_s() + recv_processing_s()
+            if delay > 0:
+                yield self.env.timeout(delay)
+            return
+
+        # -------------------------
+        # GOSSIP (bounded work)
+        # -------------------------
+        if PROP_MODEL == "gossip":
+            # Approximate accounting: each contacted neighbor counts as an "edge send".
+            # We'll account for fanout contacts per round.
+            frontier = [self]
+            rounds = max(0, int(GOSSIP_ROUNDS))
+            for _ in range(rounds):
+                if not frontier:
+                    break
+
+                # bytes/contact: assume one block message
+                contacts = 0
+                for u in frontier:
+                    fan = min(GOSSIP_FANOUT, len(u.neighbors))
+                    contacts += fan
+                io_requests += contacts
+                network_data += contacts * b.size
+
+                # Send-time over data NIC for this round's contacts
+                round_bytes = contacts * b.size
+                send_delay = data_plane_send_delay_s(round_bytes)
+                if send_delay > 0:
+                    yield self.env.timeout(send_delay)
+
+                # Propagate with per-contact latency+cpu
+                newly = []
+                for u in frontier:
+                    if not u.neighbors:
+                        continue
+                    fan = min(GOSSIP_FANOUT, len(u.neighbors))
+                    picks = random.sample(u.neighbors, fan) if fan > 0 else []
+                    for v in picks:
+                        if b.id in v.blocks:
+                            continue
+                        yield self.env.timeout(sample_one_way_latency_s() + recv_processing_s())
+                        if b.id in v.blocks:
+                            continue
+                        v.blocks.add(b.id)
+                        newly.append(v)
+
+                frontier = newly
+            return
+
+        # -------------------------
+        # EXACT (explicit neighbors)
+        # -------------------------
         degree = len(self.neighbors)
         if degree > 0:
             total_bytes = degree * b.size
-
-            if DATA_TOKENS is not None:
-                # Token bucket: wait until we have enough bytes to send this block to all neighbors.
-                yield DATA_TOKENS.get(total_bytes)
-            elif DATA_BW_MBPS and DATA_BW_MBPS > 0:
-                # Fallback: deterministic delay based on bandwidth.
-                Bps = DATA_BW_MBPS * 1e6 / 8.0
-                send_time = total_bytes / max(Bps, 1e-9)
+            send_time = data_plane_send_delay_s(total_bytes)
+            if send_time > 0:
                 yield self.env.timeout(send_time)
-            # else: effectively infinite bandwidth, no delay
 
         for n in self.neighbors:
             io_requests += 1
@@ -187,11 +300,60 @@ class Miner:
 # ============================================================
 # Workload
 # ============================================================
-def wallet(env: simpy.Environment, wid: int, count: int, interval: float):
-    """Each wallet creates `count` tx spaced by `interval` seconds."""
-    for _ in range(count or 0):
+def tx_arrivals(env: simpy.Environment, wallets: int, tx_per_wallet: int, interval: float):
+    """
+    Aggregate tx arrivals (fast):
+      Each interval, each wallet emits ~1 tx, until tx_per_wallet per wallet is exhausted.
+    """
+    global pool_count, pool_deque, POOL_MODE
+
+    total_remaining = int(max(0, wallets) * max(0, tx_per_wallet))
+    if total_remaining <= 0:
+        return
+
+    # Edge case: interval <= 0 => dump all at t=0
+    if interval is None or interval <= 0:
+        if POOL_MODE == "count":
+            pool_count += total_remaining
+        else:
+            # timestamps all 0.0
+            for _ in range(total_remaining):
+                pool_deque.append((-1, 0.0))
+        return
+
+    while total_remaining > 0:
         yield env.timeout(interval)
-        pool.append((wid, env.now))
+        batch = min(wallets, total_remaining)
+
+        if POOL_MODE == "count":
+            pool_count += batch
+        else:
+            now = env.now
+            # We don't care which wallet specifically; keep wid=-1
+            for _ in range(batch):
+                pool_deque.append((-1, now))
+
+        total_remaining -= batch
+
+
+def pool_available() -> int:
+    global pool_count, pool_deque, POOL_MODE
+    return pool_count if POOL_MODE == "count" else len(pool_deque)
+
+
+def pool_take(k: int):
+    """Remove k tx from pool, O(1) per tx in deque mode, O(1) total in count mode."""
+    global pool_count, pool_deque, POOL_MODE
+    if k <= 0:
+        return
+    if POOL_MODE == "count":
+        pool_count = max(0, pool_count - k)
+        return
+    # deque mode
+    for _ in range(k):
+        if not pool_deque:
+            break
+        pool_deque.popleft()
 
 
 # ============================================================
@@ -213,7 +375,7 @@ def metronome_messages(shards: int, num_nodes: int) -> int:
 
 
 # ============================================================
-# Coordinator – metronome mode
+# Coordinators
 # ============================================================
 def coord(env,
           nodes,
@@ -237,13 +399,14 @@ def coord(env,
           control_bw_mbps,
           broadcast_bw_mbps,
           overlap_broadcast,
-          msg_proc_ms):
+          msg_proc_ms,
+          quiet_blocks=False):
     """
     Metronome: S shard winners talk to metronome + each other, then block flood.
     Round time includes mining + verification + coordination + control NIC.
-    Block flood is modeled via Node graph (data-plane NIC).
+    Block flood uses chosen propagation model (exact/gossip/analytic).
     """
-    global network_data, io_requests, total_tx, total_coins, pool
+    global network_data, io_requests, total_tx, total_coins
 
     if not miners:
         raise ValueError("Need at least one miner")
@@ -273,7 +436,7 @@ def coord(env,
 
     reward = init_reward if init_reward is not None else 50.0
 
-    has_tx = (tx_per_wallet or 0) > 0
+    has_tx = (tx_per_wallet or 0) > 0 and (wallets or 0) > 0
     total_needed = (wallets or 0) * (tx_per_wallet or 0) if has_tx else None
     pool_processed = 0
 
@@ -288,11 +451,10 @@ def coord(env,
         yield env.timeout(dt_mine)
 
         if has_tx:
-            avail = len(pool)
+            avail = pool_available()
             take = min(avail, tot_cap)
             pool_processed += take
-            for _ in range(take):
-                pool.pop(0)
+            pool_take(take)
         else:
             take = 0
 
@@ -307,8 +469,6 @@ def coord(env,
         block_msg_cost = msgs * float(msg_cost or 0.0)
         total_msg_cost += block_msg_cost
 
-        net_note = "ctrl via NIC; block flood via data NIC"
-
         dt_rest = dt_verify + dt_coord + dt_ctrl_net
         round_dt = dt_mine + dt_rest
         if dt_rest > 0:
@@ -318,17 +478,22 @@ def coord(env,
         txs_next = (take + 1) if has_tx else 1
         b = Block(bc, txs_next, round_dt)
         total_tx += txs_next
+
+        # start propagation
         env.process(random.choice(nodes).receive(b))
 
-        print(
-            f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
-            f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
-            f"dt={round_dt:.3f}s mine={dt_mine:.3f}s verify={dt_verify:.3f}s "
-            f"coord={dt_coord:.3f}s ctrl_net={dt_ctrl_net:.3f}s "
-            f"[{net_note}] Msgs:{total_coordination_messages} MsgCost_blk:{block_msg_cost:.2f}"
-        )
-
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
+
+        # Printing control
+        if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
+            net_note = f"prop={PROP_MODEL}"
+            print(
+                f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
+                f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
+                f"dt={round_dt:.3f}s mine={dt_mine:.3f}s verify={dt_verify:.3f}s "
+                f"coord={dt_coord:.3f}s ctrl_net={dt_ctrl_net:.3f}s "
+                f"[{net_note}] Msgs_tot:{total_coordination_messages} MsgCost_blk:{block_msg_cost:.2f}"
+            )
 
         if print_int and bc % print_int == 0:
             _print_summary(env.now, bc, blocks_limit, diff, total_hash, total_msg_cost)
@@ -381,15 +546,15 @@ def coord_no_metronome(env,
                        broadcast_bw_mbps,
                        overlap_broadcast,
                        msg_proc_ms,
-                       msg_cost):
+                       msg_cost,
+                       quiet_blocks=False):
     """
     No metronome:
       * S shard winners, each announces to the whole network
       * Winners then coordinate pairwise
       * One winner submits merged block
-    All control messages go through NIC model; blocks through data NIC.
     """
-    global network_data, io_requests, total_tx, total_coins, pool
+    global network_data, io_requests, total_tx, total_coins
 
     if not miners:
         raise ValueError("Need at least one miner")
@@ -415,7 +580,7 @@ def coord_no_metronome(env,
 
     reward = init_reward if init_reward is not None else 50.0
 
-    has_tx = (tx_per_wallet or 0) > 0
+    has_tx = (tx_per_wallet or 0) > 0 and (wallets or 0) > 0
     total_needed = (wallets or 0) * (tx_per_wallet or 0) if has_tx else None
     pool_processed = 0
     tot_cap = max(0, int(total_blocksize or 0))
@@ -431,11 +596,10 @@ def coord_no_metronome(env,
         yield env.timeout(dt_mine)
 
         if has_tx:
-            avail = len(pool)
+            avail = pool_available()
             take = min(avail, tot_cap)
             pool_processed += take
-            for _ in range(take):
-                pool.pop(0)
+            pool_take(take)
         else:
             take = 0
 
@@ -450,8 +614,6 @@ def coord_no_metronome(env,
         total_control_msgs += (msgs_ann + msgs_pair)
         total_msg_cost += (msgs_ann + msgs_pair) * float(msg_cost or 0.0)
 
-        net_note = "ctrl via NIC; block flood via data NIC"
-
         dt_rest = dt_verify + dt_control
         round_dt = dt_mine + dt_rest
         if dt_rest > 0:
@@ -461,17 +623,20 @@ def coord_no_metronome(env,
         txs_next = (take + 1) if has_tx else 1
         b = Block(bc, txs_next, round_dt)
         total_tx += txs_next
+
         env.process(random.choice(nodes).receive(b))
 
-        print(
-            f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
-            f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
-            f"dt={round_dt:.3f}s mine={dt_mine:.3f}s verify={dt_verify:.3f}s "
-            f"announce+pair={dt_control:.3f}s [{net_note}] "
-            f"CtrlMsgs:{total_control_msgs} MsgCost_tot:{total_msg_cost:.2f}"
-        )
-
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
+
+        if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
+            net_note = f"prop={PROP_MODEL}"
+            print(
+                f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
+                f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
+                f"dt={round_dt:.3f}s mine={dt_mine:.3f}s verify={dt_verify:.3f}s "
+                f"announce+pair={dt_control:.3f}s [{net_note}] "
+                f"CtrlMsgs:{total_control_msgs} MsgCost_tot:{total_msg_cost:.2f}"
+            )
 
         if print_int and bc % print_int == 0:
             _print_summary(env.now, bc, blocks_limit, diff, total_hash,
@@ -528,7 +693,8 @@ def coord_leader_metronome(env,
                            overlap_broadcast,
                            msg_proc_ms,
                            msg_cost,
-                           verify_mode="leader"):
+                           verify_mode="leader",
+                           quiet_blocks=False):
     """
     Leader metronome:
 
@@ -537,11 +703,11 @@ def coord_leader_metronome(env,
       3) Other winners send to leader only (S-1 msgs).
       4) Verification depends on verify_mode:
          * leader      – all tx at leader
-         * leader_par  – leader verifies in parallel (threads)
+         * leader_par  – leader verifies in parallel (threads env var)
          * shard       – per-shard verify + S attestations to leader
-      5) Leader broadcasts final block via block NIC.
+      5) Leader broadcasts final block via chosen propagation model.
     """
-    global network_data, io_requests, total_tx, total_coins, pool
+    global network_data, io_requests, total_tx, total_coins
 
     if not miners:
         raise ValueError("Need at least one miner")
@@ -567,7 +733,7 @@ def coord_leader_metronome(env,
 
     reward = init_reward if init_reward is not None else 50.0
 
-    has_tx = (tx_per_wallet or 0) > 0
+    has_tx = (tx_per_wallet or 0) > 0 and (wallets or 0) > 0
     total_needed = (wallets or 0) * (tx_per_wallet or 0) if has_tx else None
     pool_processed = 0
     tot_cap = max(0, int(total_blocksize or 0))
@@ -584,11 +750,10 @@ def coord_leader_metronome(env,
         yield env.timeout(dt_mine)
 
         if has_tx:
-            avail = len(pool)
+            avail = pool_available()
             take = min(avail, tot_cap)
             pool_processed += take
-            for _ in range(take):
-                pool.pop(0)
+            pool_take(take)
         else:
             take = 0
 
@@ -624,8 +789,6 @@ def coord_leader_metronome(env,
         else:
             raise ValueError("--verify_mode must be one of: leader, shard, leader_par")
 
-        net_note = "ctrl via NIC; block flood via data NIC"
-
         dt_rest = dt_control + dt_verify_term
         round_dt = dt_mine + dt_rest
         if dt_rest > 0:
@@ -634,17 +797,20 @@ def coord_leader_metronome(env,
         bc += 1
         b = Block(bc, txs_next, round_dt)
         total_tx += txs_next
+
         env.process(random.choice(nodes).receive(b))
 
-        print(
-            f"[{env.now:.2f}] Block {bc} (leader shard={leader_idx}) "
-            f"tx={txs_next-1} dt={round_dt:.3f}s "
-            f"mine={dt_mine:.3f}s control={dt_control:.3f}s "
-            f"{verify_note}={dt_verify_term:.3f}s "
-            f"[{net_note}] CtrlMsgs_tot:{total_control_msgs} MsgCost_tot:{total_msg_cost:.2f}"
-        )
-
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
+
+        if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
+            net_note = f"prop={PROP_MODEL}"
+            print(
+                f"[{env.now:.2f}] Block {bc} (leader shard={leader_idx}) "
+                f"tx={txs_next-1} dt={round_dt:.3f}s "
+                f"mine={dt_mine:.3f}s control={dt_control:.3f}s "
+                f"{verify_note}={dt_verify_term:.3f}s "
+                f"[{net_note}] CtrlMsgs_tot:{total_control_msgs} MsgCost_tot:{total_msg_cost:.2f}"
+            )
 
         if print_int and bc % print_int == 0:
             _print_summary(env.now, bc, blocks_limit, diff, total_hash,
@@ -669,17 +835,18 @@ def _apply_halving_and_mint(bc: int, reward: float, halving_interval: int):
 
 
 def _print_summary(now, bc, blocks_limit, diff, total_hash, total_msg_cost, extra_fields=""):
-    global total_tx, total_coins, pool, network_data, io_requests
+    global total_tx, total_coins, network_data, io_requests, POOL_MODE, pool_count, pool_deque
     abt = now / bc if bc else 0.0
     tps = total_tx / now if now > 0 else 0.0
     infl = 0.0
     eta = ((blocks_limit - bc) * abt) if blocks_limit else 0.0
     pct = (bc / blocks_limit) * 100 if blocks_limit else 0.0
+    pool_len = pool_count if POOL_MODE == "count" else len(pool_deque)
     print(
         f"[{now:.2f}] Sum B:{bc}/{blocks_limit} {pct:.1f}% abt:{abt:.2f}s "
         f"tps:{tps} infl:{infl:.2f}% ETA:{eta:.2f}s "
         f"Diff:{human(diff)} ΣH:{human(total_hash)} Tx:{total_tx} "
-        f"C:{total_coins} Pool:{len(pool)} "
+        f"C:{total_coins} Pool:{pool_len} "
         f"NMB:{network_data/1e6:.2f} IO:{io_requests} "
         f"MsgCost_tot:{total_msg_cost:.2f} {extra_fields}"
     )
@@ -687,13 +854,13 @@ def _print_summary(now, bc, blocks_limit, diff, total_hash, total_msg_cost, extr
 
 def _print_final(now, bc, blocks_limit, diff, total_hash,
                  total_msgs, total_msg_cost, extra_fields=""):
-    global total_tx, total_coins, pool, network_data, io_requests, sim_summary
+    global total_tx, total_coins, network_data, io_requests, sim_summary, POOL_MODE, pool_count, pool_deque
     total_time = now
     abt_global = total_time / bc if bc else 0.0
     tps_total = total_tx / total_time if total_time > 0 else 0.0
     msg_cost_per_tx = (total_msg_cost / total_tx) if total_tx > 0 else 0.0
+    pool_len = pool_count if POOL_MODE == "count" else len(pool_deque)
 
-    # ---- UPDATED: store richer summary for machine consumption ----
     sim_summary = {
         "blocks": bc,
         "total_time": total_time,
@@ -713,7 +880,7 @@ def _print_final(now, bc, blocks_limit, diff, total_hash,
         f"[******] End B:{bc}/{blocks_limit or bc} "
         f"abt_global:{abt_global:.2f}s tps:{tps_total} "
         f"Diff:{human(diff)} ΣH:{human(total_hash)} "
-        f"Tx:{total_tx} C:{total_coins} Pool:{len(pool)} "
+        f"Tx:{total_tx} C:{total_coins} Pool:{pool_len} "
         f"NMB:{network_data/1e6:.2f} IO:{io_requests} "
         f"Msgs:{total_msgs} MsgCost_tot:{total_msg_cost:.2f} "
         f"(per_tx:{msg_cost_per_tx:.6f}) {extra_fields}"
@@ -721,7 +888,39 @@ def _print_final(now, bc, blocks_limit, diff, total_hash,
 
 
 # ============================================================
-# CLI
+# Graph generation helpers
+# ============================================================
+def build_random_k_out_graph(nodes: List[Node], k: int, seed: Optional[int] = None):
+    """
+    Build a directed k-out graph:
+      each node chooses up to k distinct neighbors uniformly at random.
+
+    Runs in ~O(N*k) and avoids O(N^2) per-node list rebuilds.
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    n = len(nodes)
+    if n <= 1 or k <= 0:
+        for u in nodes:
+            u.neighbors = []
+        return
+
+    k = min(k, n - 1)
+    node_ids = list(range(n))
+
+    for i, u in enumerate(nodes):
+        # sample k distinct ids != i via rejection sampling
+        picks = set()
+        while len(picks) < k:
+            j = random.randrange(n)
+            if j != i:
+                picks.add(j)
+        u.neighbors = [nodes[j] for j in picks]
+
+
+# ============================================================
+# CLI / main
 # ============================================================
 def main():
     p = argparse.ArgumentParser(description="Winner-based sharding simulator")
@@ -755,9 +954,11 @@ def main():
     p.add_argument("--total-blocksize", dest="total_blocksize", type=int, default=4096,
                    help="Total tx per merged block across ALL shards")
 
-    # Verification & coordination (metronome-style)
+    # Verification & coordination
     p.add_argument("--tx_cost_ms", type=float, default=1.0)
     p.add_argument("--rtt_ms", type=float, default=0.0)
+    p.add_argument("--jitter_ms", type=float, default=1.0,
+                   help="One-way jitter upper-bound (ms)")
     p.add_argument("--coord_rounds", type=int, default=0)
     p.add_argument("--cost", type=float, default=0.0,
                    help="Accounting cost per coordination message")
@@ -780,9 +981,9 @@ def main():
     p.add_argument("--config", type=str,
                    help="JSON config file (overlays CLI)")
     p.add_argument("--prefill", action="store_true",
-                   help="Prefill all workload tx at t=0")
+                   help="Prefill all workload tx at t=0 (fast)")
 
-    # Mode switches
+    # Modes
     p.add_argument("--no_metronome", action="store_true")
     p.add_argument("--leader_metronome", action="store_true")
 
@@ -790,12 +991,23 @@ def main():
     p.add_argument("--verify_mode", type=str, default="leader",
                    choices=["leader", "shard", "leader_par"])
 
-    # Plot the Results
-    p.add_argument("--results_csv", type=str, default="",
-               help="Relative path under Results/ (e.g., Near.csv, non-sharded.csv)")
-    p.add_argument("--results_dir", type=str, default="Results",
-               help="Results output directory (default: Results)")
+    # Performance knobs
+    p.add_argument("--pool_mode", type=str, default="count",
+                   choices=["count", "deque"],
+                   help="Transaction pool storage: count (fastest) or deque (FIFO timestamps)")
+    p.add_argument("--prop_model", type=str, default="exact",
+                   choices=["exact", "gossip", "analytic"],
+                   help="Block propagation model")
+    p.add_argument("--gossip_fanout", type=int, default=16)
+    p.add_argument("--gossip_rounds", type=int, default=10)
+    p.add_argument("--quiet_blocks", action="store_true",
+                   help="Suppress per-block prints; keep summary prints")
 
+    # Results output
+    p.add_argument("--results_csv", type=str, default="",
+                   help="Relative path under Results/ (e.g., Near.csv, non-sharded.csv)")
+    p.add_argument("--results_dir", type=str, default="Results",
+                   help="Results output directory (default: Results)")
 
     args = p.parse_args()
 
@@ -814,34 +1026,49 @@ def main():
         blocks_limit = int(args.years * YEAR / (args.blocktime or 1))
     args.blocks_limit = blocks_limit
 
-    # Global network knobs
+    # Globals setup
     global LINK_RTT_MS, LINK_JITTER_MS, LINK_MSG_PROC_MS, CTRL_BW_MBPS, DATA_BW_MBPS
-    LINK_RTT_MS = args.rtt_ms
-    LINK_JITTER_MS = 1.0   # fixed jitter for now
-    LINK_MSG_PROC_MS = args.msg_proc_ms
-    CTRL_BW_MBPS = args.control_bw_mbps
-    DATA_BW_MBPS = args.broadcast_bw_mbps
+    LINK_RTT_MS = float(args.rtt_ms or 0.0)
+    LINK_JITTER_MS = float(args.jitter_ms or 0.0)
+    LINK_MSG_PROC_MS = float(args.msg_proc_ms or 0.0)
+    CTRL_BW_MBPS = float(args.control_bw_mbps or 0.0)
+    DATA_BW_MBPS = float(args.broadcast_bw_mbps or 0.0)
+
+    global PROP_MODEL, GOSSIP_FANOUT, GOSSIP_ROUNDS
+    PROP_MODEL = str(args.prop_model or "exact")
+    GOSSIP_FANOUT = int(args.gossip_fanout or 16)
+    GOSSIP_ROUNDS = int(args.gossip_rounds or 10)
+
+    global POOL_MODE, pool_count, pool_deque
+    POOL_MODE = str(args.pool_mode or "count")
+    pool_count = 0
+    pool_deque = deque()
 
     env = simpy.Environment()
 
-    init_bandwidth_buckets(env)
-
+    # Build workload
     total_tx_need = (args.wallets or 0) * (args.transactions or 0)
     if args.prefill and total_tx_need > 0:
-        for _ in range(total_tx_need):
-            pool.append(("prefill", 0.0))
+        if POOL_MODE == "count":
+            pool_count = total_tx_need
+        else:
+            for _ in range(total_tx_need):
+                pool_deque.append((-1, 0.0))
     else:
-        for i in range(args.wallets or 0):
-            env.process(wallet(env, i, args.transactions, args.interval))
+        env.process(tx_arrivals(env, args.wallets or 0, args.transactions or 0, args.interval or 0.0))
 
+    # Build nodes + graph
     nodes = [Node(env, i) for i in range(args.nodes or 0)]
-    for n in nodes:
-        others = [x for x in nodes if x != n]
-        deg = min(args.neighbors or 0, len(others))
-        n.neighbors = random.sample(others, deg) if deg > 0 else []
+    build_random_k_out_graph(nodes, int(args.neighbors or 0), seed=None)
 
+    global GLOBAL_N, GLOBAL_AVG_DEG
+    GLOBAL_N = len(nodes)
+    GLOBAL_AVG_DEG = int(args.neighbors or 0)
+
+    # Miners
     miners = [Miner(i, args.hashrate or 0.0) for i in range(args.miners or 0)]
 
+    # Choose coordinator
     if args.leader_metronome:
         coord_proc = env.process(
             coord_leader_metronome(
@@ -865,6 +1092,7 @@ def main():
                 msg_proc_ms=args.msg_proc_ms,
                 msg_cost=args.cost,
                 verify_mode=args.verify_mode,
+                quiet_blocks=args.quiet_blocks,
             )
         )
     elif args.no_metronome:
@@ -889,6 +1117,7 @@ def main():
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms,
                 msg_cost=args.cost,
+                quiet_blocks=args.quiet_blocks,
             )
         )
     else:
@@ -915,6 +1144,7 @@ def main():
                 broadcast_bw_mbps=args.broadcast_bw_mbps,
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms,
+                quiet_blocks=args.quiet_blocks,
             )
         )
 
@@ -933,7 +1163,6 @@ def main():
         tps = 0.0
         msgs = 0
 
-    # PAPER "mode" you want in CSV:
     mode = "conventional" if int(args.shards or 1) == 1 else "sharded"
     block_size_tx = float(args.total_blocksize or 0)
     shards = int(args.shards or 1)
@@ -965,34 +1194,32 @@ def main():
     )
 
     PAPER_CSV_HEADER = [
-    "currency",
-    "nodes",
-    "wallets",
-    "miners",
-    "transactions",
-    "interval",
-    "shards",
-    "average block time",
-    "block size",
-    "messages",
-    "mode",
-    "tps",
-    "no. of blocks generated",
-    "blocktime in configuration file"
-]
+        "currency",
+        "nodes",
+        "wallets",
+        "miners",
+        "transactions",
+        "interval",
+        "shards",
+        "average block time",
+        "block size",
+        "messages",
+        "mode",
+        "tps",
+        "no. of blocks generated",
+        "blocktime in configuration file"
+    ]
 
     def upsert_paper_csv_row(results_path: str, row: dict):
         """
         Upsert a row into Results CSV using a composite key:
-        (currency, shards, block size, mode)
-
-        If a matching row exists, replace it; otherwise append.
+        (currency, shards, block size, mode, blocktime in configuration file)
         """
         path = Path(results_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # key_fields = ["currency", "shards", "block size", "mode"]
         key_fields = ["currency", "shards", "block size", "mode", "blocktime in configuration file"]
+
         def row_key(r: dict):
             return tuple(str(r.get(k, "")) for k in key_fields)
 
@@ -1000,7 +1227,6 @@ def main():
         if path.exists() and path.stat().st_size > 0:
             with path.open("r", newline="") as f:
                 reader = csv.DictReader(f)
-                # If file already exists but header differs, we still read what we can.
                 for r in reader:
                     rows.append(r)
 
@@ -1008,19 +1234,18 @@ def main():
         replaced = False
         for i, r in enumerate(rows):
             if row_key(r) == new_key:
-                rows[i] = {**r, **row}  # preserve any extra existing columns if present
+                rows[i] = {**r, **row}
                 replaced = True
                 break
         if not replaced:
             rows.append(row)
 
-        # Always write in your exact preferred header order
         with path.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=PAPER_CSV_HEADER, extrasaction="ignore")
             writer.writeheader()
             for r in rows:
                 writer.writerow({k: r.get(k, "") for k in PAPER_CSV_HEADER})
-    # ===== Paper-style CSV row (matches your existing files) =====
+
     paper_row = {
         "currency": currency,
         "nodes": int(args.nodes or 0),
@@ -1042,11 +1267,11 @@ def main():
     print(",".join(PAPER_CSV_HEADER))
     print(",".join(str(paper_row[h]) for h in PAPER_CSV_HEADER))
 
-    # Write/Upsert into Results/<results_csv> if provided (via CLI or config)
     if getattr(args, "results_csv", ""):
         out_path = str(Path(args.results_dir) / args.results_csv)
         upsert_paper_csv_row(out_path, paper_row)
         print(f"Wrote Results row -> {out_path}")
+
 
 if __name__ == "__main__":
     main()
