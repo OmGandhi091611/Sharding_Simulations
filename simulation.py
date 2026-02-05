@@ -173,7 +173,7 @@ class Node:
     def _gossip_round(self, frontier: List["Node"], b: Block) -> Generator[Event, None, List["Node"]]:
         """
         One gossip step:
-          Each node in frontier contacts up to GOSSIP_FANOUT neighbors.
+        Each node in frontier contacts up to GOSSIP_FANOUT neighbors.
         Returns next frontier (nodes newly infected this round).
         """
         newly = []
