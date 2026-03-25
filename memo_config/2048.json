@@ -12,7 +12,7 @@
   "halving_interval": 0,
   "shards": 2,
   "init_reward": 51.8457072,
-  "total_blocksize": 2048,
+  "total_blocksize": 1024,
   "tx_cost_ms": 0.2,
   "rtt_ms": 150,
   "coord_rounds": 1,

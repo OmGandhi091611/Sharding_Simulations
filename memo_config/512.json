@@ -2,7 +2,7 @@
   "currency": "memo",
   "nodes": 1000,
   "neighbors": 500,
-  "blocktime": 1.171875,
+  "blocktime": 0.5859375,
   "miners": 1000,
   "hashrate": 1000000,
   "wallets": 1000,

@@ -24,6 +24,10 @@ CONFIGS = {
     "memo_s64": "memo_config/64.json",
     "memo_s128": "memo_config/128.json",
     "memo_s256": "memo_config/256.json",
+    "memo_s512": "memo_config/512.json",
+    "memo_s1024": "memo_config/1024.json",
+    "memo_s2048": "memo_config/2048.json",
+    "memo_s4096": "memo_config/4096.json",
 }
 
 LOG_DIR = "memo_logs"

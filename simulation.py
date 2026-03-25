@@ -32,6 +32,8 @@ from collections import deque
 from typing import Optional, Deque, Tuple, List
 from typing import Generator
 from simpy.events import Event
+from io import StringIO
+import tempfile
 
 
 # ============================================================
@@ -375,6 +377,38 @@ def metronome_messages(shards: int, num_nodes: int) -> int:
 
 
 # ============================================================
+# MINING PATCH HELPER
+# ============================================================
+def _mining_params(total_hash: float, S: int, target_bt: float, diff0: Optional[float]) -> Tuple[float, float]:
+    """
+    Compute (diff, lam_shard) consistent with:
+      - shard_times[i] ~ Exp(lam_shard)
+      - dt_mine = max(shard_times)   (wait for slowest shard)
+      - total network hashpower is split evenly across S shards
+      - target_bt means: E[dt_mine] ≈ target_bt
+
+    Math:
+      E[max] = H_S / lam_shard
+      lam_shard = (H_total/S) / diff
+      Choose diff so H_S / lam_shard = target_bt  => diff = (H_total * target_bt) / (S * H_S)
+    """
+    S = max(1, int(S))
+    Hs = harmonic_number(S)
+
+    if total_hash <= 0:
+        raise ValueError("Total hashrate must be > 0")
+
+    if diff0 is not None:
+        diff = float(diff0)
+    else:
+        diff = (float(total_hash) * float(target_bt)) / (S * Hs)
+
+    # hashpower per shard (assume even split)
+    lam_shard = (float(total_hash) / S) / max(diff, 1e-12)
+    return diff, lam_shard
+
+
+# ============================================================
 # Coordinators
 # ============================================================
 def coord(env,
@@ -411,19 +445,12 @@ def coord(env,
     if not miners:
         raise ValueError("Need at least one miner")
     S = max(1, shards or 1)
-    Hs = harmonic_number(S)
 
     total_hash = sum(m.h for m in miners)
     if total_hash <= 0:
         raise ValueError("Total hashrate must be > 0")
 
-    if diff0 is not None:
-        diff = float(diff0)
-    else:
-        lam_target = (S * Hs) / max(target_bt, 1e-9)
-        diff = total_hash / lam_target
-
-    lam_shard = total_hash / diff
+    diff, lam_shard = _mining_params(total_hash, S, target_bt, diff0)
     tx_cost_s = max(0.0, float(tx_cost_ms)) / 1000.0
 
     rtt_s = max(0.0, float(rtt_ms)) / 1000.0
@@ -559,19 +586,12 @@ def coord_no_metronome(env,
     if not miners:
         raise ValueError("Need at least one miner")
     S = max(1, shards or 1)
-    Hs = harmonic_number(S)
 
     total_hash = sum(m.h for m in miners)
     if total_hash <= 0:
         raise ValueError("Total hashrate must be > 0")
 
-    if diff0 is not None:
-        diff = float(diff0)
-    else:
-        lam_target = (S * Hs) / max(target_bt, 1e-9)
-        diff = total_hash / lam_target
-
-    lam_shard = total_hash / diff
+    diff, lam_shard = _mining_params(total_hash, S, target_bt, diff0)
     tx_cost_s = max(0.0, float(tx_cost_ms)) / 1000.0
 
     bc = 0
@@ -712,19 +732,12 @@ def coord_leader_metronome(env,
     if not miners:
         raise ValueError("Need at least one miner")
     S = max(1, shards or 1)
-    Hs = harmonic_number(S)
 
     total_hash = sum(m.h for m in miners)
     if total_hash <= 0:
         raise ValueError("Total hashrate must be > 0")
 
-    if diff0 is not None:
-        diff = float(diff0)
-    else:
-        lam_target = (S * Hs) / max(target_bt, 1e-9)
-        diff = total_hash / lam_target
-
-    lam_shard = total_hash / diff
+    diff, lam_shard = _mining_params(total_hash, S, target_bt, diff0)
     tx_cost_s = max(0.0, float(tx_cost_ms)) / 1000.0
 
     bc = 0
@@ -1214,6 +1227,11 @@ def main():
         """
         Upsert a row into Results CSV using a composite key:
         (currency, shards, block size, mode, blocktime in configuration file)
+
+        Robustness:
+            - tolerates accidental NUL bytes in an existing CSV
+            - decodes safely (UTF-8, replacing bad bytes)
+            - writes atomically (tmp file + os.replace)
         """
         path = Path(results_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1224,28 +1242,81 @@ def main():
             return tuple(str(r.get(k, "")) for k in key_fields)
 
         rows = []
+
+        # ---------- Read existing rows safely ----------
         if path.exists() and path.stat().st_size > 0:
-            with path.open("r", newline="") as f:
-                reader = csv.DictReader(f)
+            try:
+                # Read as bytes so we can strip NUL safely before CSV parse
+                raw = path.read_bytes()
+
+                nul_count = raw.count(b"\x00")
+                if nul_count > 0:
+                    print(f"[warn] Found {nul_count} NUL byte(s) in {path}; sanitizing before CSV parse")
+                    raw = raw.replace(b"\x00", b"")
+
+                # Decode safely
+                text = raw.decode("utf-8", errors="replace")
+
+                # Parse CSV from sanitized text
+                reader = csv.DictReader(StringIO(text))
                 for r in reader:
+                    if r is None:
+                        continue
+                    # skip fully empty rows
+                    if not any(str(v).strip() for v in r.values() if v is not None):
+                        continue
                     rows.append(r)
 
+            except csv.Error as e:
+                # If parsing still fails, preserve the bad file and start a clean table
+                bad_path = path.with_suffix(path.suffix + ".corrupt")
+                try:
+                    # keep original for inspection
+                    if not bad_path.exists():
+                        path.replace(bad_path)
+                    else:
+                        # if .corrupt already exists, overwrite via bytes copy
+                        bad_path.write_bytes(path.read_bytes())
+                        path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                print(f"[warn] CSV parse failed for {path}: {e}. Started fresh; backup at {bad_path}")
+                rows = []
+
+        # ---------- Upsert ----------
         new_key = row_key(row)
         replaced = False
         for i, r in enumerate(rows):
             if row_key(r) == new_key:
-                rows[i] = {**r, **row}
+                # merge existing + new row (new values win)
+                merged = dict(r)
+                merged.update(row)
+                rows[i] = merged
                 replaced = True
                 break
+
         if not replaced:
             rows.append(row)
 
-        with path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=PAPER_CSV_HEADER, extrasaction="ignore")
-            writer.writeheader()
-            for r in rows:
-                writer.writerow({k: r.get(k, "") for k in PAPER_CSV_HEADER})
+        # ---------- Atomic write ----------
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix=".tmp_results_", suffix=".csv", dir=str(path.parent))
+        try:
+            with os.fdopen(tmp_fd, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=PAPER_CSV_HEADER, extrasaction="ignore")
+                writer.writeheader()
+                for r in rows:
+                    writer.writerow({k: r.get(k, "") for k in PAPER_CSV_HEADER})
+                f.flush()
+                os.fsync(f.fileno())
 
+            os.replace(tmp_name, path)  # atomic on same filesystem
+        finally:
+            # Cleanup temp file if something failed before replace
+            if os.path.exists(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except OSError:
+                    pass
     paper_row = {
         "currency": currency,
         "nodes": int(args.nodes or 0),
@@ -1260,7 +1331,7 @@ def main():
         "mode": mode,
         "tps": float(tps),
         "no. of blocks generated": int(blocks),
-        "blocktime in configuration file": int(args.blocktime),
+        "blocktime in configuration file": float(args.blocktime),
     }
 
     print("\n===== PAPER CSV Row =====")

@@ -10,7 +10,14 @@ Reads CSVs from Results/ (same level as graph folders) and writes plots to:
 
 No cross_compare_graphs. No extra "plots/" folder.
 
-Update: Bubble chart now labels ONLY TPS for the 4 corner bubbles.
+Update:
+- Bubble chart labels ONLY TPS for the 4 corner bubbles.
+- MEMO graphs now use:
+    x = number of shards (uniform spacing, 2 units apart)
+    y = TPS
+    one panel per block size
+    one line per configured blocktime
+- MEMO uses unique TPS values directly from CSV, no averaging.
 """
 
 import argparse
@@ -19,6 +26,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
+
 
 # ----------------------------
 # Utilities
@@ -44,8 +52,16 @@ def savefig(outdir: str, name: str, dpi: int = 300) -> str:
     safe_mkdir(outdir)
     path = os.path.join(outdir, name)
     plt.tight_layout()
-    plt.savefig(path, dpi=dpi)
+    plt.savefig(path, dpi=dpi, bbox_inches="tight")
     return path
+
+
+def _pick_col(df, candidates):
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    for c in candidates:
+        if c.lower() in cols:
+            return cols[c.lower()]
+    return None
 
 
 # ----------------------------
@@ -60,7 +76,6 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
     df = ensure_lower_currency(df)
     ensure_numeric(df, ["average block time", "block size", "messages", "tps", "no. of blocks generated"])
 
-    # If multiple rows per currency, average them
     agg = (
         df.groupby("currency", as_index=False)
           .agg(
@@ -70,7 +85,6 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
           )
     )
 
-    # Reference values (edit as needed)
     real_world = {
         "btc":  {"name": "Bitcoin",      "tps": 7.0,   "avg_block_time": 600.0},
         "bch":  {"name": "Bitcoin Cash", "tps": 200.0, "avg_block_time": 600.0},
@@ -92,7 +106,6 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
     x = np.arange(len(labels))
     width = 0.35
 
-    # TPS compare
     plt.figure(figsize=(7, 4))
     plt.bar(x - width / 2, comparison["sim_tps"].tolist(), width, label="Simulated TPS")
     plt.bar(x + width / 2, comparison["real_tps"].tolist(), width, label="Real-world TPS")
@@ -107,7 +120,6 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
     else:
         plt.close()
 
-    # Block time compare
     plt.figure(figsize=(7, 4))
     plt.bar(x - width / 2, comparison["sim_avg_block_time"].tolist(), width, label="Simulated Avg Block Time")
     plt.bar(x + width / 2, comparison["real_avg_block_time"].tolist(), width, label="Real-world Avg Block Time")
@@ -128,20 +140,13 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 #    (BTC hypothetical; label 4 corner bubbles with ONLY TPS)
 # ----------------------------
 def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, show: bool):
-    # BTC-only bubble chart:
-    #   x = block size (tx per block)
-    #   y = average block time (s)
-    #   bubble size ∝ TPS
-
     if not os.path.exists(non_csv):
         print(f"[skip] non-sharded CSV not found: {non_csv}")
         return
 
-    # Robust CSV read (your file may have inconsistent header/columns)
     df = pd.read_csv(non_csv, engine="python", on_bad_lines="warn")
     df.columns = [str(c).strip().lower() for c in df.columns]
 
-    # Normalize column name variants
     def pick_col(candidates):
         for c in candidates:
             if c in df.columns:
@@ -149,22 +154,25 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         return None
 
     c_currency = pick_col(["currency"])
-    c_bs      = pick_col(["block size", "block_size", "blocksize"])
-    c_abt     = pick_col(["average block time", "avg block time", "avg_block_time"])
-    c_tps     = pick_col(["tps"])
+    c_bs = pick_col(["block size", "block_size", "blocksize"])
+    c_abt = pick_col(["average block time", "avg block time", "avg_block_time"])
+    c_tps = pick_col(["tps"])
 
     missing = []
-    if c_currency is None: missing.append("currency")
-    if c_bs is None:      missing.append("block size")
-    if c_abt is None:     missing.append("average block time")
-    if c_tps is None:     missing.append("tps")
+    if c_currency is None:
+        missing.append("currency")
+    if c_bs is None:
+        missing.append("block size")
+    if c_abt is None:
+        missing.append("average block time")
+    if c_tps is None:
+        missing.append("tps")
 
     if missing:
         print(f"[skip] non-sharded CSV missing required columns: {missing}")
         print("Columns seen:", df.columns.tolist())
         return
 
-    # Clean currency + filter btc_hypothetical
     df[c_currency] = (
         df[c_currency]
         .astype(str)
@@ -176,11 +184,9 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     df = df[df[c_currency].eq("btc_hypothetical")].copy()
     if df.empty:
         print("[skip] non-sharded CSV has no rows for btc_hypothetical")
-        print("Currencies seen:", sorted(df[c_currency].dropna().unique().tolist())[:20])
         return
 
-    # Numeric coercion
-    df[c_bs]  = pd.to_numeric(df[c_bs], errors="coerce")
+    df[c_bs] = pd.to_numeric(df[c_bs], errors="coerce")
     df[c_abt] = pd.to_numeric(df[c_abt], errors="coerce")
     df[c_tps] = pd.to_numeric(df[c_tps], errors="coerce")
 
@@ -189,7 +195,6 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         print("[skip] BTC bubble plot has no usable rows after numeric coercion")
         return
 
-    # Normalize block size to int
     df["bs"] = df[c_bs].astype(float).round().astype(int)
 
     base_block_sizes = sorted(df["bs"].unique().tolist())
@@ -197,12 +202,10 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         print("[skip] BTC data has no valid block sizes")
         return
 
-    # Categorical x positions spaced by 2
     x_positions = {bs: i * 2 for i, bs in enumerate(base_block_sizes)}
     xticks = [x_positions[bs] for bs in base_block_sizes]
     xticklabels = [str(bs) for bs in base_block_sizes]
 
-    # Bubble area proportional to TPS
     max_tps = float(df[c_tps].max()) if float(df[c_tps].max()) > 0 else 1.0
     target_max_area = 1600.0
     scale = target_max_area / max_tps
@@ -224,9 +227,6 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         linewidth=0.7,
     )
 
-    # ----------------------------
-    # Annotate 4 corner bubbles with ONLY TPS
-    # ----------------------------
     bs_min = int(sub["bs"].min())
     bs_max = int(sub["bs"].max())
 
@@ -236,12 +236,12 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         except Exception:
             return str(v)
 
-    def annotate_row(row, title=None, dx=0.8, dy=0.0):
+    def annotate_row(row, dx=0.8, dy=0.0):
         xi = float(x_positions[int(row["bs"])])
         yi = float(row[c_abt])
         tps_val = row[c_tps]
 
-        label = f"TPS={fmt_float(tps_val, 0)}" if not title else f"{title}\nTPS={fmt_float(tps_val, 0)}"
+        label = f"TPS={fmt_float(tps_val, 0)}"
 
         plt.annotate(
             label,
@@ -254,21 +254,15 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
             arrowprops=dict(arrowstyle="->", lw=1.0),
         )
 
-    # For smallest block size: label lowest BT and highest BT
     sub_min = sub[sub["bs"] == bs_min]
     if not sub_min.empty:
-        r_min_bt = sub_min.loc[sub_min[c_abt].idxmin()]
-        r_max_bt = sub_min.loc[sub_min[c_abt].idxmax()]
-        annotate_row(r_min_bt, dx=0.8)
-        annotate_row(r_max_bt, dx=0.8)
+        annotate_row(sub_min.loc[sub_min[c_abt].idxmin()], dx=0.8)
+        annotate_row(sub_min.loc[sub_min[c_abt].idxmax()], dx=0.8)
 
-    # For largest block size: label lowest BT and highest BT
     sub_max = sub[sub["bs"] == bs_max]
     if not sub_max.empty:
-        r_min_bt = sub_max.loc[sub_max[c_abt].idxmin()]
-        r_max_bt = sub_max.loc[sub_max[c_abt].idxmax()]
-        annotate_row(r_min_bt, dx=0.8)
-        annotate_row(r_max_bt, dx=0.8)
+        annotate_row(sub_max.loc[sub_max[c_abt].idxmin()], dx=0.8)
+        annotate_row(sub_max.loc[sub_max[c_abt].idxmax()], dx=0.8)
 
     plt.xticks(xticks, xticklabels, rotation=45)
     plt.xlabel("Block size (transactions per block)")
@@ -285,108 +279,223 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
 
 
 # ----------------------------
-# 3) MEMO per-blocksize bar panels -> memo_graphs/
+# 3) MEMO faceted TPS-vs-shards -> memo_graphs/
+#    one panel per block size, one line per configured blocktime
+#    shard positions are uniformly spaced by 2 units
+#    unique TPS values are used directly from CSV
 # ----------------------------
-def global_log_range(series, pad_factor=1.5, min_exp=0):
-    vals = series.to_numpy(dtype=float)
-    vals = vals[vals > 0]
-    if vals.size == 0:
-        max_exp = 1
-        exps = np.arange(min_exp, max_exp + 1)
-        return 10.0**min_exp, 10.0**max_exp, exps
-    vmax = vals.max()
-    hi = vmax * pad_factor
-    max_exp = int(np.ceil(np.log10(hi)))
-    exps = np.arange(min_exp, max_exp + 1)
-    return 10.0**min_exp, 10.0**max_exp, exps
-
-
 def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
     if not os.path.exists(memo_csv):
         print(f"[skip] memo CSV not found: {memo_csv}")
         return
 
-    df = pd.read_csv(memo_csv)
-    ensure_numeric(df, ["shards", "block size", "tps", "messages", "average block time"])
-    df = df.dropna(subset=["shards", "block size"])
+    df = pd.read_csv(memo_csv, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip() for c in df.columns]
 
-    if df.empty:
-        print("[skip] memo CSV has no usable rows")
+    c_shards = _pick_col(df, ["shards"])
+    c_bs = _pick_col(df, ["block size", "block_size", "blocksize"])
+    c_tps = _pick_col(df, ["tps"])
+    c_bt_cfg = _pick_col(df, [
+        "blocktime in configuration file",
+        "configured blocktime",
+        "config blocktime",
+        "blocktime",
+        "block time"
+    ])
+
+    missing = []
+    if c_shards is None:
+        missing.append("shards")
+    if c_bs is None:
+        missing.append("block size")
+    if c_tps is None:
+        missing.append("tps")
+    if c_bt_cfg is None:
+        missing.append("blocktime in configuration file")
+
+    if missing:
+        print(f"[skip] memo CSV missing required columns: {missing}")
+        print("Columns seen:", df.columns.tolist())
         return
 
-    tps_ymin, tps_ymax, tps_exps = global_log_range(df["tps"], pad_factor=1.5, min_exp=0)
-    msg_ymin, msg_ymax, msg_exps = global_log_range(df["messages"], pad_factor=1.5, min_exp=0)
+    for c in [c_shards, c_bs, c_tps, c_bt_cfg]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    bt_ymin, bt_ymax, bt_exps_full = global_log_range(df["average block time"], pad_factor=1.5, min_exp=-2)
-    bt_exps = np.arange(-1, bt_exps_full.max() + 1)
+    df = df.dropna(subset=[c_shards, c_bs, c_tps, c_bt_cfg]).copy()
+    if df.empty:
+        print("[skip] memo CSV has no usable rows after numeric coercion")
+        return
 
-    block_sizes = sorted(df["block size"].unique())
+    df["shards_int"] = df[c_shards].astype(int)
+    df["block_size_int"] = df[c_bs].astype(int)
+    df["blocktime_cfg"] = df[c_bt_cfg].astype(float).round(6)
+    df["tps_val"] = df[c_tps].astype(float)
 
-    def log_fmt_local(val, pos):
-        if val <= 0:
-            return ""
-        exp = int(np.round(np.log10(val)))
-        return rf"$10^{{{exp}}}$"
+    dup_count = df.duplicated(subset=["block_size_int", "blocktime_cfg", "shards_int"]).sum()
+    if dup_count > 0:
+        print(f"[warn] Found {dup_count} duplicate MEMO config rows; keeping first occurrence")
 
-    for bs in block_sizes:
-        sub = df[df["block size"] == bs].sort_values("shards")
-        if sub.empty:
+    plot_df = df[["block_size_int", "blocktime_cfg", "shards_int", "tps_val"]].copy()
+    plot_df = plot_df.drop_duplicates(
+        subset=["block_size_int", "blocktime_cfg", "shards_int"],
+        keep="first"
+    )
+    plot_df = plot_df.sort_values(["block_size_int", "blocktime_cfg", "shards_int"])
+
+    block_sizes = sorted(plot_df["block_size_int"].unique().tolist(), reverse=True)
+    if not block_sizes:
+        print("[skip] memo CSV has no valid block sizes")
+        return
+
+    all_blocktimes = sorted(plot_df["blocktime_cfg"].unique().tolist())
+    all_shards = sorted(plot_df["shards_int"].unique().tolist())
+
+    # Uniform spacing for shard counts
+    x_positions = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks = [x_positions[s] for s in all_shards]
+    xticklabels = [str(s) for s in all_shards]
+
+    # ---------- Part 1 / Part 2 figures ----------
+    # Use sharey=False so each panel is readable on its own
+    groups = [block_sizes[:4], block_sizes[4:]]
+    group_names = ["memo_tps_vs_shards_part1.png", "memo_tps_vs_shards_part2.png"]
+
+    for group_idx, bs_group in enumerate(groups):
+        bs_group = [b for b in bs_group if b in block_sizes]
+        if not bs_group:
             continue
 
-        shards = sub["shards"].tolist()
-        tps = sub["tps"].tolist()
-        msgs = sub["messages"].tolist()
-        bt = sub["average block time"].tolist()
+        n = len(bs_group)
+        fig, axes = plt.subplots(1, n, figsize=(5 * n, 4.2), sharey=False)
+        if n == 1:
+            axes = [axes]
 
-        x = np.arange(len(shards))
-        width = 0.6
+        legend_handles = None
+        legend_labels = None
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        for ax, bs in zip(axes, bs_group):
+            sub = plot_df[plot_df["block_size_int"] == bs].copy()
+            if sub.empty:
+                ax.axis("off")
+                continue
 
-        ax0 = axes[0]
-        ax0.bar(x, tps, width=width, color="#1f77b4")
-        ax0.set_xticks(x)
-        ax0.set_xticklabels([str(int(s)) for s in shards])
-        ax0.set_xlabel("Shards")
-        ax0.set_ylabel("TPS (log scale)")
-        ax0.set_title("TPS")
-        ax0.set_yscale("log")
-        ax0.set_ylim(tps_ymin, tps_ymax)
-        ax0.set_yticks([10.0**e for e in tps_exps])
-        ax0.yaxis.set_major_formatter(mtick.FuncFormatter(log_fmt_local))
-        ax0.grid(axis="y", linestyle="--", alpha=0.4, which="both")
+            for bt in all_blocktimes:
+                line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
+                if line_df.empty:
+                    continue
 
-        ax1 = axes[1]
-        ax1.bar(x, msgs, width=width, color="#ff7f0e")
-        ax1.set_xticks(x)
-        ax1.set_xticklabels([str(int(s)) for s in shards])
-        ax1.set_xlabel("Shards")
-        ax1.set_ylabel("Messages (log scale)")
-        ax1.set_title("Messages")
-        ax1.set_yscale("log")
-        ax1.set_ylim(msg_ymin, msg_ymax)
-        ax1.set_yticks([10.0**e for e in msg_exps])
-        ax1.yaxis.set_major_formatter(mtick.FuncFormatter(log_fmt_local))
-        ax1.grid(axis="y", linestyle="--", alpha=0.4, which="both")
+                x_vals = [x_positions[s] for s in line_df["shards_int"]]
 
-        ax2 = axes[2]
-        ax2.bar(x, bt, width=width, color="#2ca02c")
-        ax2.set_xticks(x)
-        ax2.set_xticklabels([str(int(s)) for s in shards])
-        ax2.set_xlabel("Shards")
-        ax2.set_ylabel("Average Block Time (s, log scale)")
-        ax2.set_title("Block Time")
-        ax2.set_yscale("log")
-        ax2.set_ylim(bt_ymin, bt_ymax)
-        ax2.set_yticks([10.0**e for e in bt_exps])
-        ax2.yaxis.set_major_formatter(mtick.FuncFormatter(log_fmt_local))
-        ax2.grid(axis="y", linestyle="--", alpha=0.4, which="both")
+                ax.plot(
+                    x_vals,
+                    line_df["tps_val"],
+                    marker="o",
+                    linewidth=1.8,
+                    markersize=4,
+                    label=f"BT={bt:g}s"
+                )
 
-        savefig(outdir, f"memo_bs_{int(float(bs))}_summary_logBT.png")
+            ax.set_title(f"Block Size = {bs}")
+            ax.set_xlabel("Number of Shards")
+            ax.set_xticks(xticks)
+            ax.set_xticklabels(xticklabels)
+            ax.grid(True, linestyle="--", alpha=0.35)
+
+            if ax is axes[0]:
+                ax.set_ylabel("TPS")
+
+            if legend_handles is None:
+                legend_handles, legend_labels = ax.get_legend_handles_labels()
+
+        if legend_handles:
+            fig.legend(
+                legend_handles,
+                legend_labels,
+                loc="upper center",
+                ncol=min(4, len(legend_labels)),
+                bbox_to_anchor=(0.5, 1.08),
+                frameon=True
+            )
+
+        fig.suptitle("MEMO: TPS vs Number of Shards", y=1.14, fontsize=13)
+        savefig(outdir, group_names[group_idx])
+
         if show:
             plt.show()
         else:
-            plt.close()
+            plt.close(fig)
+
+    # ---------- Full all-blocksizes figure ----------
+    # Use shared log scale so tiny TPS values are visible too
+    n_all = len(block_sizes)
+    if n_all > 0:
+        cols = 3
+        rows = int(np.ceil(n_all / cols))
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 3.8 * rows), sharey=True)
+        axes = np.array(axes).reshape(-1)
+
+        legend_handles = None
+        legend_labels = None
+
+        for i, bs in enumerate(block_sizes):
+            ax = axes[i]
+            sub = plot_df[plot_df["block_size_int"] == bs].copy()
+            if sub.empty:
+                ax.axis("off")
+                continue
+
+            for bt in all_blocktimes:
+                line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
+                if line_df.empty:
+                    continue
+
+                x_vals = [x_positions[s] for s in line_df["shards_int"]]
+
+                ax.plot(
+                    x_vals,
+                    line_df["tps_val"],
+                    marker="o",
+                    linewidth=1.5,
+                    markersize=3.5,
+                    label=f"BT={bt:g}s"
+                )
+
+            ax.set_title(f"BS={bs}")
+            ax.set_xlabel("Shards")
+            ax.set_xticks(xticks)
+            ax.set_xticklabels(xticklabels)
+            ax.grid(True, linestyle="--", alpha=0.35)
+
+            # Force log scale starting at 10^-1
+            ax.set_yscale("log")
+            ax.set_ylim(bottom=1e-1)
+
+            if i % cols == 0:
+                ax.set_ylabel("TPS")
+
+            if legend_handles is None:
+                legend_handles, legend_labels = ax.get_legend_handles_labels()
+
+        for j in range(n_all, len(axes)):
+            axes[j].axis("off")
+
+        if legend_handles:
+            fig.legend(
+                legend_handles,
+                legend_labels,
+                loc="upper center",
+                ncol=min(4, len(legend_labels)),
+                bbox_to_anchor=(0.5, 1.02),
+                frameon=True
+            )
+
+        fig.suptitle("MEMO: TPS vs Number of Shards by Block Size and Blocktime", y=1.06, fontsize=13)
+        savefig(outdir, "memo_tps_vs_shards_all_blocksizes.png")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
 
 # ----------------------------
@@ -408,7 +517,6 @@ def run_near_vs_targets(near_csv: str, outdir: str, show: bool):
 
     df_near = df_near.sort_values("shards")
 
-    # Your targets (edit as needed)
     near_targets = {
         4: {"tps": 3000.0, "avg_block_time": 0.6},
         6: {"tps": 3500.0, "avg_block_time": 0.6},
