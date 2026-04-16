@@ -63,6 +63,16 @@ BLOCK_TIMES  = [
     2.34375,
     1.171875,
     0.5859375,
+    0.524288,
+    0.262144,   # needed for bs=262144
+    0.131072,   # needed for bs=131072
+    0.065536,   # needed for bs=65536
+    0.032768,
+    0.016384,
+    0.008192,
+    0.004096,
+    0.002048,
+    0.001024,
 ]
 
 # Fixed number of blocks per run — every run terminates predictably
