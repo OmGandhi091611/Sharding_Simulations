@@ -47,7 +47,7 @@ BLOCK_SIZES  = [
     65536,
     131072,
     262144,
-    524288
+    524288,
 ]
 
 BLOCK_TIMES  = [
@@ -62,8 +62,11 @@ BLOCK_TIMES  = [
     4.6875,
     2.34375,
     1.171875,
-    0.5859375
+    0.5859375,
 ]
+
+# Fixed number of blocks per run — every run terminates predictably
+BLOCKS = 500
 
 # ------------------------------------------------------------------ #
 # Worker pool limit
@@ -84,12 +87,23 @@ def build_grid() -> List[Dict[str, Any]]:
     combos = []
     for shards, blocksize, blocktime in itertools.product(
             SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES):
+
+        # Pool must cover BLOCKS rounds with 2x safety margin
+        # so it never drains before the run completes
+        total_tx_needed = blocksize * BLOCKS * 2
+
+        # Cap wallets at 10000, scale transactions to cover the pool
+        wallets      = min(10000, max(1000, total_tx_needed // 1000))
+        transactions = (total_tx_needed + wallets - 1) // wallets  # ceil div
+
         name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}".replace(".", "p")
         combos.append({
             "name":            name,
             "shards":          shards,
             "total_blocksize": blocksize,
             "blocktime":       blocktime,
+            "wallets":         wallets,
+            "transactions":    transactions,
         })
     return combos
 
@@ -119,6 +133,9 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--shards",          str(combo["shards"])]
     cmd += ["--total-blocksize", str(combo["total_blocksize"])]
     cmd += ["--blocktime",       str(combo["blocktime"])]
+    cmd += ["--wallets",         str(combo["wallets"])]
+    cmd += ["--transactions",    str(combo["transactions"])]
+    cmd += ["--blocks",          str(BLOCKS)]
 
     # Suppress per-block prints - too noisy for hundreds of runs
     cmd += ["--quiet_blocks"]
