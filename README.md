@@ -1,75 +1,101 @@
-# Sharding_Simulations
+# Sharding Simulations
 
-Python-based simulation framework to evaluate **non-sharded** (Bitcoin-style), **NEAR-like sharded**, and **MEMO-style sharded** designs under configurable network + workload parameters.
+**A Python-based discrete-event simulation framework for evaluating non-sharded, NEAR-protocol-style, and MEMO-style sharded blockchain architectures under configurable network and workload conditions.**
 
-This repo includes:
-- `simulation.py` for **single-run** experiments (`--config <file>.json`)
-- parallel runners (in `Parallel_processes/`) to execute many configs concurrently
-- `make_graphs.py` to read CSVs from `Results/` and write figures directly into:
-  - `non_sharded_graphs/`
-  - `near_graphs/`
-  - `memo_graphs/`
-  - `Validations/`
-
-Important: `Results/` and all graph folders are expected to be at the **same directory level**.
+> Om Gandhi — Illinois Institute of Technology
+> Under review: IEEE ICDCS 2026
 
 ---
 
-## Repository structure
+## Abstract
 
-```text
+This framework provides a controlled simulation environment to study the throughput, latency, and communication overhead of three blockchain architectural designs: (1) a conventional non-sharded chain (Bitcoin-style), (2) a NEAR-protocol-inspired sharded design, and (3) a MEMO-style sharded design. Experiments are parameterized across shard count, block size, block time, and network topology (local, US-WAN, global-WAN), and results are aggregated for cross-condition comparison and visualization.
+
+---
+
+## Table of Contents
+
+1. [Repository Structure](#repository-structure)
+2. [Setup and Dependencies](#setup-and-dependencies)
+3. [Single-Run Experiments](#single-run-experiments)
+4. [Configuration Parameters](#configuration-parameters)
+5. [Parallel Sweep Execution](#parallel-sweep-execution)
+6. [Result Aggregation](#result-aggregation)
+7. [Network Condition Variants](#network-condition-variants)
+8. [Plot Generation](#plot-generation)
+9. [Results CSV Format](#results-csv-format)
+10. [Validation](#validation)
+11. [Citation](#citation)
+
+---
+
+## Repository Structure
+
+```
 .
 ├── memo_config/              # JSON configs for MEMO experiments
-├── memo_graphs/              # Figures for MEMO experiments
-├── near_config/              # JSON configs for NEAR-like sharded experiments
-├── near_graphs/              # Figures for NEAR-like experiments
+├── memo_graphs/              # Output figures for MEMO experiments
+│   ├── local/                #   Local network condition plots
+│   ├── usa/                  #   US WAN condition plots
+│   └── global/               #   Global WAN condition plots
+├── near_config/              # JSON configs for NEAR-like experiments
+├── near_graphs/              # Output figures for NEAR-like experiments
 ├── non_sharded_config/       # JSON configs for non-sharded experiments
-├── non_sharded_graphs/       # Figures for non-sharded experiments (includes bubble plot)
-├── Parallel_processes/       # Parallel sweep runners (non-sharded / NEAR / MEMO)
-├── Results/                  # Aggregated CSV outputs from runs
-├── Validations/              # Validation figures (saved here)
-├── simulation.py             # Main simulator (single run)
-├── make_graphs.py            # Plot generator (reads Results/, writes to *_graphs/ + Validations/)
-├── requirements.txt
-└── README.md
+├── non_sharded_graphs/       # Output figures for non-sharded (includes bubble plot)
+├── Parallel_processes/       # Parallel sweep runners
+├── Results/                  # Aggregated CSV outputs
+│   ├── memo_results_local.csv
+│   ├── memo_results_usa.csv
+│   ├── memo_results_global.csv
+│   ├── Near.csv
+│   ├── non-sharded.csv
+│   └── Validation.csv
+├── Validations/              # Validation figures
+├── simulation.py             # Main simulator entry point (single run)
+├── make_graphs.py            # Plot generator
+├── merge_results.c           # OpenMP-parallel CSV merger (see Result Aggregation)
+└── requirements.txt
 ```
+
+> `Results/` and all graph folders must reside at the **same directory level** as `make_graphs.py`.
 
 ---
 
-## Setup
+## Setup and Dependencies
 
-### Python
-Recommended: Python 3.10+ (3.11/3.12 also fine).
+### Requirements
 
-### Create a virtual environment (recommended)
+- Python 3.10 or later (3.11 / 3.12 supported)
+- GCC with OpenMP support (for `merge_results.c`)
+
+### Python environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-### Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
 Minimal `requirements.txt`:
 
-```txt
+```
 simpy
 pandas
 numpy
 matplotlib
 ```
 
-If you pin versions and your environment doesn’t satisfy them, `pip` may refuse to install until you upgrade/downgrade Python or packages. If you keep versions unpinned, installs are easier but plots may look slightly different across machines.
+### Compile the CSV merger
+
+```bash
+gcc -O2 -fopenmp merge_results.c -o merge_results
+```
 
 ---
 
-## Running a single simulation
+## Single-Run Experiments
 
-`simulation.py` is the single-run entry point. Each run uses exactly one config JSON:
+Each experiment run consumes exactly one JSON config file:
 
 ```bash
 python3 simulation.py --config non_sharded_config/<CONFIG>.json
@@ -77,106 +103,71 @@ python3 simulation.py --config near_config/<CONFIG>.json
 python3 simulation.py --config memo_config/<CONFIG>.json
 ```
 
+Results are appended to the CSV file specified by `results_dir` and `results_csv` inside the config.
+
 ---
 
-## Simulation config (JSON): arguments explained
+## Configuration Parameters
 
-You edit these inside each JSON file in `memo_config/`, `near_config/`, `non_sharded_config/`.
+All parameters are set inside the JSON config files in `memo_config/`, `near_config/`, or `non_sharded_config/`. Keys may vary slightly between experiment families.
 
-Note: some keys may differ slightly between experiment families. Always check your config JSON to see which keys exist in that run.
+### Identity and scale
 
-### Identity + size
-- `currency` — label written into the results CSV (e.g., `btc`, `near`, `memo`); change the string to rename the series.
-- `nodes` — number of network nodes; increase/decrease to scale network size.
-- `miners` — number of miners/block producers; change to model different competition levels.
-- `wallets` — number of wallets generating transactions; change to model user population.
-- `neighbors` — peer degree per node (overlay connectivity); higher = denser network.
-- `shards` — shard count; `1` means conventional, `>1` means sharded.
+| Key | Description |
+|---|---|
+| `currency` | Label written into results CSV (e.g., `btc`, `near`, `memo`) |
+| `nodes` | Number of network nodes |
+| `miners` | Number of block producers |
+| `wallets` | Number of transaction-generating wallets |
+| `neighbors` | Peer degree per node (overlay connectivity) |
+| `shards` | Shard count; `1` = conventional chain, `>1` = sharded |
 
-### Workload generation
-- `transactions` — total number of transactions produced/processed in a run; increase for longer/heavier experiments.
-- `interval` — time (or step) between transaction-generation attempts; smaller = higher offered load.
-- `tx_cost_ms` — per-transaction processing cost in milliseconds; increase to simulate slower validation/CPU.
+### Workload
 
-### Block / throughput knobs
-- `blocktime` — configured/target block interval (seconds); change to simulate faster/slower chains.
-- `total_blocksize` — maximum transactions per block (capacity); change to evaluate bigger/smaller blocks.
+| Key | Description |
+|---|---|
+| `transactions` | Total transactions produced per run |
+| `interval` | Time between transaction-generation attempts |
+| `tx_cost_ms` | Per-transaction processing cost (ms) |
+
+### Block parameters
+
+| Key | Description |
+|---|---|
+| `blocktime` | Configured target block interval (seconds) |
+| `total_blocksize` | Maximum transactions per block |
 
 ### Network model
-- `rtt_ms` — baseline RTT (ms); increase to simulate higher latency.
-- `msg_size` — assumed message size (bytes) for protocol messages; increase for heavier communication.
-- `control_bw_mbps` — bandwidth for control/coordination traffic (Mbps); reduce to stress coordination.
-- `broadcast_bw_mbps` — bandwidth for broadcast traffic (Mbps); reduce to slow propagation.
-- `overlap_broadcast` — whether broadcasts overlap/pipeline (`true`) or serialize (`false`); toggling changes propagation timing.
 
-### Coordination / sharding overhead (if present in your configs)
-- `coord_rounds` — number of coordination rounds per block; increase to model more overhead.
-- `cost` — cost-model toggle/constant (if your simulator uses it); change only if you know how your sim interprets it.
+| Key | Description |
+|---|---|
+| `rtt_ms` | Baseline round-trip time (ms) |
+| `msg_size` | Protocol message size (bytes) |
+| `control_bw_mbps` | Bandwidth for coordination traffic (Mbps) |
+| `broadcast_bw_mbps` | Bandwidth for broadcast traffic (Mbps) |
+| `overlap_broadcast` | Whether broadcasts pipeline (`true`) or serialize (`false`) |
 
-### Printing / progress
-- `print_int` — how often the simulator prints progress stats; increase to reduce log spam.
+### Sharding overhead
 
-### Results output (where CSV rows go)
-- `results_dir` — directory where CSV results are written (recommended: `Results`); change to redirect output where you want to store your results.
-- `results_csv` — filename inside `results_dir` (e.g., `non-sharded.csv`, `Near.csv`, `memo_results.csv`); change to route output into a specific CSV (a new name creates a new CSV inside `Results/`).
+| Key | Description |
+|---|---|
+| `coord_rounds` | Coordination rounds per block |
+| `cost` | Cost-model toggle (if used by your sim) |
 
-Mode convention in CSV output:
-- if `shards == 1` → `mode = conventional`
-- if `shards > 1` → `mode = sharded`
+### Output routing
 
----
+| Key | Description |
+|---|---|
+| `results_dir` | Directory for CSV output (recommended: `Results`) |
+| `results_csv` | Filename within `results_dir` |
 
-## Local vs WAN comparison (server vs wide-area network)
-
-Goal: run the *same* workload twice:
-- **LOCAL** (low latency / high bandwidth)
-- **WAN** (higher `rtt_ms`, lower bandwidth)
-
-### Step 1: Make sure LOCAL + WAN write to different CSV files
-In your JSON config(s), set different `results_csv` values so runs don’t overwrite each other.
-
-Example:
-- Local configs:  `results_csv: "memo_local.csv"`
-- WAN configs:    `results_csv: "memo_wan.csv"`
-
-WAN knobs (typical):
-- increase `rtt_ms`
-- optionally reduce `control_bw_mbps` / `broadcast_bw_mbps`
-
-### Step 2: Run simulations (LOCAL then WAN)
-
-```bash
-# LOCAL
-python3 simulation.py --config memo_config/<LOCAL_CONFIG>.json
-
-# WAN
-python3 simulation.py --config memo_config/<WAN_CONFIG>.json
-```
+> Mode convention: `shards == 1` → `mode = conventional`; `shards > 1` → `mode = sharded`
 
 ---
 
-## Results CSV format
+## Parallel Sweep Execution
 
-All result CSVs follow this column order:
-
-```text
-currency,nodes,wallets,miners,transactions,interval,shards,average block time,block size,messages,mode,tps,no. of blocks generated
-```
-
-Example:
-
-```csv
-currency,nodes,wallets,miners,transactions,interval,shards,average block time,block size,messages,mode,tps,no. of blocks generated
-near,1000,1000,1000,1000,0.01,4,0.61,1800,559892,sharded,2959.9847,556
-near,1000,1000,1000,1000,0.01,6,0.61,2100,482247,sharded,3418.7128,477
-near,1000,1000,1000,1000,0.01,9,0.59,2400,424089,sharded,4068.2828,417
-```
-
----
-
-## Running experiment sweeps in parallel
-
-Parallel runners live in `Parallel_processes/` and launch many configs concurrently.
+Parallel runners in `Parallel_processes/` launch many configs concurrently. Each simulation run writes to its own per-run CSV and log file inside `Results/runs/`, avoiding any file-write contention.
 
 ```bash
 python Parallel_processes/non_sharded_parallel.py
@@ -184,128 +175,167 @@ python Parallel_processes/near_parallel.py
 python Parallel_processes/memo_parallel.py
 ```
 
-Parallel runner script knobs (edit inside the runner file):
-- `SIM_SCRIPT` — which sim file to execute (typically `simulation.py`); change only if you rename the sim file.
-- `CONFIGS` — mapping of `run_name → path/to/config.json`; add/remove entries to change your sweep.
-- `LOG_DIR` — folder where per-run logs are stored; rename to keep logs separated.
+Editable knobs inside each runner:
+
+| Key | Description |
+|---|---|
+| `SIM_SCRIPT` | Simulator file to execute (default: `simulation.py`) |
+| `CONFIGS` | Mapping of `run_name → path/to/config.json` |
+| `LOG_DIR` | Directory for per-run log files |
 
 ---
 
-## Plot generation (`make_graphs.py`)
+## Result Aggregation
 
-What it does:
-- reads CSVs from `Results/`
-- writes graphs directly into:
-  - `non_sharded_graphs/`
-  - `near_graphs/`
-  - `memo_graphs/`
-  - `Validations/`
-- does not create any extra `plots/` directory
+After a parallel sweep, individual per-run CSVs are merged into a single consolidated output using the OpenMP-parallelized C merger. **The merger also automatically deletes all input CSVs and their matching `.log` files after a successful merge**, keeping the workspace clean.
 
-Run it:
+```bash
+./merge_results Results/memo_results_local.csv Results/runs/run_*.csv
+```
+
+General usage:
+
+```bash
+./merge_results <output.csv> <input1.csv> [input2.csv ...]
+```
+
+The merger:
+- Reads all input files concurrently using OpenMP
+- Writes a single header + one data row per input file to the output
+- Removes all input CSVs and matching `.log` files only after the output is fully written and closed
+
+---
+
+## Network Condition Variants
+
+Experiments are conducted under three network conditions to evaluate performance across deployment environments. Each condition writes to a separate results CSV to prevent overwriting.
+
+| Condition | `results_csv` | Description |
+|---|---|---|
+| Local | `memo_results_local.csv` | Low latency, high bandwidth (server / LAN) |
+| US WAN | `memo_results_usa.csv` | Moderate latency, continental-scale network |
+| Global WAN | `memo_results_global.csv` | High latency, intercontinental network |
+
+Relevant JSON knobs to differentiate conditions:
+
+```json
+// Local
+{ "rtt_ms": 5, "control_bw_mbps": 1000, "broadcast_bw_mbps": 1000 }
+
+// US WAN
+{ "rtt_ms": 50, "control_bw_mbps": 100, "broadcast_bw_mbps": 100 }
+
+// Global WAN
+{ "rtt_ms": 200, "control_bw_mbps": 50, "broadcast_bw_mbps": 50 }
+```
+
+---
+
+## Plot Generation
+
+`make_graphs.py` reads CSVs from `Results/` and writes figures into the appropriate output folders. It does not create any additional `plots/` subdirectory.
+
+### Generate all plots
 
 ```bash
 python3 make_graphs.py --results_dir Results --no_show
 ```
 
-### Graph script arguments explained
-
-Inputs:
-- `--results_dir` — folder containing CSVs (default: `Results`); change if your results folder differs.
-- `--near_csv` — NEAR results filename inside `Results/` (default: `Near.csv`).
-- `--memo_csv` — MEMO results filename inside `Results/` (default: `memo_results.csv`).
-- `--non_csv` — non-sharded results filename inside `Results/` (default: `non-sharded.csv`).
-- `--validation_csv` — validation results filename inside `Results/` (default: `Validation.csv`).
-
-Outputs:
-- `--near_out` — output folder for NEAR figures (default: `near_graphs`).
-- `--memo_out` — output folder for MEMO figures (default: `memo_graphs`).
-- `--non_out` — output folder for non-sharded figures (default: `non_sharded_graphs`).
-- `--val_out` — output folder for validation figures (default: `Validations`).
-
-Display + selection:
-- `--no_show` — don’t display plots (save only); recommended on servers/Colab.
-- `--skip_near` / `--skip_memo` / `--skip_non` / `--skip_validation` — skip generating that plot category.
-
-Examples:
+### Generate MEMO plots only (all three network conditions)
 
 ```bash
-python3 make_graphs.py --no_show
-python3 make_graphs.py --skip_validation --no_show
-python3 make_graphs.py --near_csv Near.csv --near_out near_graphs --no_show
-```
-
----
-
-## Local vs WAN comparison: plotting into separate folders (MEMO only)
-
-Use this when you have **two MEMO result CSVs** (e.g., one from a LOCAL server run and one from a WAN run) and you want the plots separated.
-
-Expected inputs:
-- `Results/memo_local.csv`
-- `Results/memo_wan.csv`
-
-Outputs:
-- `memo_graphs/local/`
-- `memo_graphs/wan/`
-
-```bash
-# MEMO - LOCAL
+# Local
 python3 make_graphs.py \
-  --results_dir Results \
-  --memo_csv memo_local.csv \
+  --memo_csv memo_results_local.csv \
   --memo_out memo_graphs/local \
-  --skip_near --skip_non --skip_validation \
-  --no_show
+  --skip_near --skip_non --skip_validation --no_show
 
-# MEMO - WAN
+# US WAN
 python3 make_graphs.py \
-  --results_dir Results \
-  --memo_csv memo_wan.csv \
-  --memo_out memo_graphs/wan \
-  --skip_near --skip_non --skip_validation \
-  --no_show
+  --memo_csv memo_results_usa.csv \
+  --memo_out memo_graphs/usa \
+  --skip_near --skip_non --skip_validation --no_show
+
+# Global WAN
+python3 make_graphs.py \
+  --memo_csv memo_results_global.csv \
+  --memo_out memo_graphs/global \
+  --skip_near --skip_non --skip_validation --no_show
+```
+
+### All arguments
+
+**Inputs:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--results_dir` | `Results` | Folder containing CSVs |
+| `--near_csv` | `Near.csv` | NEAR results filename |
+| `--memo_csv` | `memo_results.csv` | MEMO results filename |
+| `--non_csv` | `non-sharded.csv` | Non-sharded results filename |
+| `--validation_csv` | `Validation.csv` | Validation results filename |
+
+**Outputs:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--near_out` | `near_graphs` | Output folder for NEAR figures |
+| `--memo_out` | `memo_graphs` | Output folder for MEMO figures |
+| `--non_out` | `non_sharded_graphs` | Output folder for non-sharded figures |
+| `--val_out` | `Validations` | Output folder for validation figures |
+
+**Display and selection:**
+
+| Argument | Description |
+|---|---|
+| `--no_show` | Save only, do not display plots (recommended on servers) |
+| `--skip_near` | Skip NEAR plot generation |
+| `--skip_memo` | Skip MEMO plot generation |
+| `--skip_non` | Skip non-sharded plot generation |
+| `--skip_validation` | Skip validation plot generation |
+
+---
+
+## Results CSV Format
+
+All result CSVs follow a consistent column schema:
+
+```
+currency, nodes, wallets, miners, transactions, interval, shards,
+average block time, block size, messages, mode, tps, no. of blocks generated
+```
+
+Example (NEAR):
+
+```csv
+currency,nodes,wallets,miners,transactions,interval,shards,average block time,block size,messages,mode,tps,no. of blocks generated
+near,1000,1000,1000,1000,0.01,4,0.61,1800,559892,sharded,2959.98,556
+near,1000,1000,1000,1000,0.01,6,0.61,2100,482247,sharded,3418.71,477
+near,1000,1000,1000,1000,0.01,9,0.59,2400,424089,sharded,4068.28,417
 ```
 
 ---
 
-## Bubble plot (non-sharded vs MEMO S=1)
+## Validation
 
-Saved into `non_sharded_graphs/` as:
+Validation compares simulator output against known real-world values for Bitcoin, Bitcoin Cash, Litecoin, and Dogecoin. Figures are written to `Validations/` and kept separate from experiment plots.
 
-```text
-bubble_tps_blocktime_vs_blocksize_nonsharded_vs_memo_s1.png
+```bash
+python3 make_graphs.py --skip_near --skip_memo --skip_non --no_show
 ```
-
-Rules:
-- X axis: block sizes taken only from `Results/non-sharded.csv`
-- X spacing: categorical positions with a 2-unit gap between each block size (0,2,4,...)
-- Y axis: `average block time`
-- bubble size: `tps`
-- MEMO series: uses `currency == "memo"` filtered to `shards == 1` (currency stays `memo`)
-
-Even with identical CSV values, plots may look slightly different across machines due to matplotlib backends/fonts/DPI. For consistent visuals, pin versions and set explicit DPI/font in the plot script.
 
 ---
 
-## Validations
+## Citation
 
-Validation figures should be written into:
+If you use this simulator in a report or publication, please cite:
 
-- `Validations/`
-
-This keeps validation plots separated from the main experiment plots.
+```
+Om Gandhi, "Sharding Simulations," GitHub repository, 2025.
+```
 
 ---
 
 ## License
 
-MIT is a common choice for research code. Add a `LICENSE` file if you want a standalone license file.
-
----
-
-## Citation (For now)
-
-If you use this simulator in a report/paper, cite as:
-
-Om Gandhi, *Sharding Simulations*, GitHub repository, 2025.
+MIT License. See `LICENSE` for details.
