@@ -52,12 +52,12 @@ This framework provides a controlled simulation environment to study the through
 │   └── Validation.csv
 ├── Validations/              # Validation figures
 ├── simulation.py             # Main simulator entry point (single run)
-├── make_graphs.py            # Plot generator
+├── graph.py            # Plot generator
 ├── merge_results.c           # OpenMP-parallel CSV merger (see Result Aggregation)
 └── requirements.txt
 ```
 
-> `Results/` and all graph folders must reside at the **same directory level** as `make_graphs.py`.
+> `Results/` and all graph folders must reside at the **same directory level** as `graph.py`.
 
 ---
 
@@ -220,44 +220,44 @@ Relevant JSON knobs to differentiate conditions:
 
 ```json
 // Local
-{ "rtt_ms": 5, "control_bw_mbps": 1000, "broadcast_bw_mbps": 1000 }
+{ "rtt_ms": 1, "control_bw_mbps": 2000, "broadcast_bw_mbps": 10000 }
 
 // US WAN
-{ "rtt_ms": 50, "control_bw_mbps": 100, "broadcast_bw_mbps": 100 }
+{ "rtt_ms": 50, "control_bw_mbps": 200, "broadcast_bw_mbps": 2000 }
 
 // Global WAN
-{ "rtt_ms": 200, "control_bw_mbps": 50, "broadcast_bw_mbps": 50 }
+{ "rtt_ms": 150, "control_bw_mbps": 100, "broadcast_bw_mbps": 1000 }
 ```
 
 ---
 
 ## Plot Generation
 
-`make_graphs.py` reads CSVs from `Results/` and writes figures into the appropriate output folders. It does not create any additional `plots/` subdirectory.
+`graph.py` reads CSVs from `Results/` and writes figures into the appropriate output folders. It does not create any additional `plots/` subdirectory.
 
 ### Generate all plots
 
 ```bash
-python3 make_graphs.py --results_dir Results --no_show
+python3 graph.py --results_dir Results --no_show
 ```
 
 ### Generate MEMO plots only (all three network conditions)
 
 ```bash
 # Local
-python3 make_graphs.py \
+python3 graph.py \
   --memo_csv memo_results_local.csv \
   --memo_out memo_graphs/local \
   --skip_near --skip_non --skip_validation --no_show
 
 # US WAN
-python3 make_graphs.py \
+python3 graph.py \
   --memo_csv memo_results_usa.csv \
   --memo_out memo_graphs/usa \
   --skip_near --skip_non --skip_validation --no_show
 
 # Global WAN
-python3 make_graphs.py \
+python3 graph.py \
   --memo_csv memo_results_global.csv \
   --memo_out memo_graphs/global \
   --skip_near --skip_non --skip_validation --no_show
@@ -321,7 +321,7 @@ near,1000,1000,1000,1000,0.01,9,0.59,2400,424089,sharded,4068.28,417
 Validation compares simulator output against known real-world values for Bitcoin, Bitcoin Cash, Litecoin, and Dogecoin. Figures are written to `Validations/` and kept separate from experiment plots.
 
 ```bash
-python3 make_graphs.py --skip_near --skip_memo --skip_non --no_show
+python3 graph.py --skip_near --skip_memo --skip_non --no_show
 ```
 
 ---
