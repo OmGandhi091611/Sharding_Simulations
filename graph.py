@@ -15,7 +15,8 @@ Update:
 - MEMO graphs now use:
     x = number of shards (uniform spacing, 2 units apart)
     y = TPS
-    one panel per block size
+    part1: 2x2 grid (4 largest block sizes)
+    part2: 2x3 grid (remaining block sizes)
     one line per configured blocktime
 - MEMO uses unique TPS values directly from CSV, no averaging.
 """
@@ -240,9 +241,7 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         xi = float(x_positions[int(row["bs"])])
         yi = float(row[c_abt])
         tps_val = row[c_tps]
-
         label = f"TPS={fmt_float(tps_val, 0)}"
-
         plt.annotate(
             label,
             xy=(xi, yi),
@@ -280,9 +279,9 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
 
 # ----------------------------
 # 3) MEMO faceted TPS-vs-shards -> memo_graphs/
-#    one panel per block size, one line per configured blocktime
-#    shard positions are uniformly spaced by 2 units
-#    unique TPS values are used directly from CSV
+#    part1: 2x2 grid (4 largest block sizes)
+#    part2: 2x3 grid (remaining block sizes)
+#    one line per configured blocktime
 # ----------------------------
 def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
     if not os.path.exists(memo_csv):
@@ -356,24 +355,24 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
     xticklabels = [str(s) for s in all_shards]
 
     # ---------- Part 1 / Part 2 figures ----------
-    # Use sharey=False so each panel is readable on its own
     groups = [block_sizes[:4], block_sizes[4:]]
     group_names = ["memo_tps_vs_shards_part1.png", "memo_tps_vs_shards_part2.png"]
+    group_grids = [(2, 2), (2, 3)]  # (rows, cols) for part1 and part2
 
     for group_idx, bs_group in enumerate(groups):
         bs_group = [b for b in bs_group if b in block_sizes]
         if not bs_group:
             continue
 
-        n = len(bs_group)
-        fig, axes = plt.subplots(1, n, figsize=(5 * n, 4.2), sharey=False)
-        if n == 1:
-            axes = [axes]
+        rows, cols = group_grids[group_idx]
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), sharey=False)
+        axes = np.array(axes).reshape(-1)
 
         legend_handles = None
         legend_labels = None
 
-        for ax, bs in zip(axes, bs_group):
+        for i, bs in enumerate(bs_group):
+            ax = axes[i]
             sub = plot_df[plot_df["block_size_int"] == bs].copy()
             if sub.empty:
                 ax.axis("off")
@@ -385,7 +384,6 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     continue
 
                 x_vals = [x_positions[s] for s in line_df["shards_int"]]
-
                 ax.plot(
                     x_vals,
                     line_df["tps_val"],
@@ -395,30 +393,40 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     label=f"BT={bt:g}s"
                 )
 
-            ax.set_title(f"Block Size = {bs}")
+            ax.set_title(f"Block Size = {bs:,}")
             ax.set_xlabel("Number of Shards")
             ax.set_xticks(xticks)
             ax.set_xticklabels(xticklabels)
             ax.grid(True, linestyle="--", alpha=0.35)
 
-            if ax is axes[0]:
+            if i % cols == 0:
                 ax.set_ylabel("TPS")
 
             if legend_handles is None:
                 legend_handles, legend_labels = ax.get_legend_handles_labels()
 
+        # Hide unused axes
+        for j in range(len(bs_group), len(axes)):
+            axes[j].axis("off")
+
+        fig.suptitle("MEMO: TPS vs Number of Shards", fontsize=13)
+
+        # Reserve space at bottom for legend, top for suptitle
+        fig.tight_layout(rect=[0, 0.10, 1, 0.95])
+
         if legend_handles:
             fig.legend(
                 legend_handles,
                 legend_labels,
-                loc="upper center",
-                ncol=min(4, len(legend_labels)),
-                bbox_to_anchor=(0.5, 1.08),
-                frameon=True
+                loc="lower center",
+                ncol=min(6, len(legend_labels)),
+                bbox_to_anchor=(0.5, 0.01),
+                frameon=True,
+                fontsize=8
             )
 
-        fig.suptitle("MEMO: TPS vs Number of Shards", y=1.14, fontsize=13)
-        savefig(outdir, group_names[group_idx])
+        safe_mkdir(outdir)
+        fig.savefig(os.path.join(outdir, group_names[group_idx]), dpi=300, bbox_inches="tight")
 
         if show:
             plt.show()
@@ -426,7 +434,6 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
             plt.close(fig)
 
     # ---------- Full all-blocksizes figure ----------
-    # Use shared log scale so tiny TPS values are visible too
     n_all = len(block_sizes)
     if n_all > 0:
         cols = 3
@@ -450,7 +457,6 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     continue
 
                 x_vals = [x_positions[s] for s in line_df["shards_int"]]
-
                 ax.plot(
                     x_vals,
                     line_df["tps_val"],
@@ -465,8 +471,6 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
             ax.set_xticks(xticks)
             ax.set_xticklabels(xticklabels)
             ax.grid(True, linestyle="--", alpha=0.35)
-
-            # Force log scale starting at 10^-1
             ax.set_yscale("log")
             ax.set_ylim(bottom=1e-1)
 
