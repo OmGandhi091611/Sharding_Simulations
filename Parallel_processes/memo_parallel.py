@@ -22,22 +22,23 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 # ------------------------------------------------------------------ #
-# Paths
+# Paths — all anchored to the project root (one level up from this script)
 # ------------------------------------------------------------------ #
-SIM_SCRIPT  = "simulation.py"
-BASE_CONFIG = "memo_config/base.json"   # common params that don't vary
-LOG_DIR     = "memo_logs"
-RESULTS_DIR = "Results"
+ROOT        = Path(__file__).resolve().parent.parent
+SIM_SCRIPT  = str(ROOT / "simulation.py")
+BASE_CONFIG = str(ROOT / "memo_config/base.json")
+LOG_DIR     = str(ROOT / "memo_logs")
+RESULTS_DIR = str(ROOT / "Results")
 RUNS_DIR    = os.path.join(RESULTS_DIR, "runs")
 FINAL_CSV   = os.path.join(RESULTS_DIR, "memo_results.csv")
-MERGE_BIN   = "./merge_results"
+MERGE_BIN   = str(ROOT / "merge_results")
 
 # ------------------------------------------------------------------ #
 # GRID — edit these three lists to define your parameter space
 # ------------------------------------------------------------------ #
-SHARD_COUNTS = [1, 2, 4, 8, 12, 16, 24]
+SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 
-BLOCK_SIZES  = [
+BLOCK_SIZES = [
     1024,
     2048,
     4096,
@@ -47,10 +48,23 @@ BLOCK_SIZES  = [
     65536,
     131072,
     262144,
+    524288,
 ]
 
-BLOCK_TIMES  = [
-    0.2
+BLOCK_TIMES = [
+    1200,
+    600,
+    300,
+    150,
+    75,
+    37.5
+    18.75,
+    9.375,
+    4,6875,
+    2.34375,
+    1.171875,
+    0.5859375,
+    0.29296875,
 ]
 
 # Fixed number of blocks per run — every run terminates predictably
