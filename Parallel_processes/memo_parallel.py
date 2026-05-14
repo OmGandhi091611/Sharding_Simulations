@@ -36,7 +36,7 @@ MERGE_BIN   = str(ROOT / "merge_results")
 # ------------------------------------------------------------------ #
 # GRID — edit these three lists to define your parameter space
 # ------------------------------------------------------------------ #
-SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
 BLOCK_SIZES = [
     1024,
@@ -67,8 +67,6 @@ BLOCK_TIMES = [
     0.29296875,
 ]
 
-# Fixed number of blocks per run — every run terminates predictably
-BLOCKS = 500
 
 # ------------------------------------------------------------------ #
 # Worker pool limit
@@ -90,22 +88,12 @@ def build_grid() -> List[Dict[str, Any]]:
     for shards, blocksize, blocktime in itertools.product(
             SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES):
 
-        # Pool must cover BLOCKS rounds with 2x safety margin
-        # so it never drains before the run completes
-        total_tx_needed = blocksize * BLOCKS * 2
-
-        # Cap wallets at 10000, scale transactions to cover the pool
-        wallets      = min(10000, max(1000, total_tx_needed // 1000))
-        transactions = (total_tx_needed + wallets - 1) // wallets  # ceil div
-
         name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}".replace(".", "p")
         combos.append({
             "name":            name,
             "shards":          shards,
             "total_blocksize": blocksize,
             "blocktime":       blocktime,
-            "wallets":         wallets,
-            "transactions":    transactions,
         })
     return combos
 
@@ -135,9 +123,6 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--shards",          str(combo["shards"])]
     cmd += ["--total-blocksize", str(combo["total_blocksize"])]
     cmd += ["--blocktime",       str(combo["blocktime"])]
-    cmd += ["--wallets",         str(combo["wallets"])]
-    cmd += ["--transactions",    str(combo["transactions"])]
-    cmd += ["--blocks",          str(BLOCKS)]
 
     # Suppress per-block prints - too noisy for hundreds of runs
     cmd += ["--quiet_blocks"]
