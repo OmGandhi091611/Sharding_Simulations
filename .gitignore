@@ -1,0 +1,5 @@
+# macOS resource fork files
+._*
+
+# Claude Code
+.claude/

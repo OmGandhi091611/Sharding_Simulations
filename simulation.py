@@ -31,8 +31,6 @@ import csv
 from pathlib import Path
 from collections import deque
 from typing import Optional, Deque, Tuple, List
-from typing import Generator
-from simpy.events import Event
 from io import StringIO
 import tempfile
 
@@ -62,16 +60,6 @@ LINK_RTT_MS = 0.0       # logical RTT
 LINK_JITTER_MS = 0.0    # extra jitter (one-way)
 LINK_MSG_PROC_MS = 0.0  # CPU per received message
 CTRL_BW_MBPS = 0.0      # control NIC throughput
-DATA_BW_MBPS = 0.0      # block NIC throughput
-
-# Propagation model
-PROP_MODEL = "exact"    # exact | gossip | analytic
-GOSSIP_FANOUT = 16
-GOSSIP_ROUNDS = 10
-
-# Cached for analytic propagation
-GLOBAL_N = 0
-GLOBAL_AVG_DEG = 0
 
 
 # ============================================================
@@ -121,15 +109,6 @@ def control_phase_delay(num_msgs: int, msg_size_bytes: int) -> float:
     return send_time + cpu_time + latency
 
 
-def data_plane_send_delay_s(total_bytes: float) -> float:
-    if total_bytes <= 0:
-        return 0.0
-    if DATA_BW_MBPS and DATA_BW_MBPS > 0:
-        Bps = DATA_BW_MBPS * 1e6 / 8.0
-        return total_bytes / max(Bps, 1e-9)
-    return 0.0
-
-
 # ============================================================
 # Core objects
 # ============================================================
@@ -148,95 +127,16 @@ class Node:
         self.blocks = set()
         self.neighbors: List["Node"] = []
 
-    def _recv_block(self, b: Block):
-        delay_s = sample_one_way_latency_s() + recv_processing_s()
-        yield self.env.timeout(delay_s)
-        if b.id in self.blocks:
-            return
-        self.blocks.add(b.id)
-        if PROP_MODEL == "exact":
-            self.env.process(self.receive(b))
-
-    def _gossip_round(self, frontier: List["Node"], b: Block) -> Generator[Event, None, List["Node"]]:
-        newly = []
-        for u in frontier:
-            if not u.neighbors:
-                continue
-            fan = min(GOSSIP_FANOUT, len(u.neighbors))
-            picks = random.sample(u.neighbors, fan) if fan > 0 else []
-            for v in picks:
-                if b.id in v.blocks:
-                    continue
-                delay_s = sample_one_way_latency_s() + recv_processing_s()
-                yield self.env.timeout(delay_s)
-                if b.id in v.blocks:
-                    continue
-                v.blocks.add(b.id)
-                newly.append(v)
-        return newly
-
     def receive(self, b: Block):
-        global network_data, io_requests, GLOBAL_N, GLOBAL_AVG_DEG
-
+        global network_data, io_requests
+        yield self.env.timeout(0)
         if b.id in self.blocks:
             return
         self.blocks.add(b.id)
-
-        if PROP_MODEL == "analytic":
-            N = max(0, int(GLOBAL_N))
-            deg = max(0, int(GLOBAL_AVG_DEG))
-            total_edges = N * deg
-            io_requests += total_edges
-            network_data += total_edges * b.size
-            total_bytes = total_edges * b.size
-            delay = data_plane_send_delay_s(total_bytes) + sample_one_way_latency_s() + recv_processing_s()
-            if delay > 0:
-                yield self.env.timeout(delay)
-            return
-
-        if PROP_MODEL == "gossip":
-            frontier = [self]
-            rounds = max(0, int(GOSSIP_ROUNDS))
-            for _ in range(rounds):
-                if not frontier:
-                    break
-                contacts = 0
-                for u in frontier:
-                    fan = min(GOSSIP_FANOUT, len(u.neighbors))
-                    contacts += fan
-                io_requests += contacts
-                network_data += contacts * b.size
-                round_bytes = contacts * b.size
-                send_delay = data_plane_send_delay_s(round_bytes)
-                if send_delay > 0:
-                    yield self.env.timeout(send_delay)
-                newly = []
-                for u in frontier:
-                    if not u.neighbors:
-                        continue
-                    fan = min(GOSSIP_FANOUT, len(u.neighbors))
-                    picks = random.sample(u.neighbors, fan) if fan > 0 else []
-                    for v in picks:
-                        if b.id in v.blocks:
-                            continue
-                        yield self.env.timeout(sample_one_way_latency_s() + recv_processing_s())
-                        if b.id in v.blocks:
-                            continue
-                        v.blocks.add(b.id)
-                        newly.append(v)
-                frontier = newly
-            return
-
-        degree = len(self.neighbors)
-        if degree > 0:
-            total_bytes = degree * b.size
-            send_time = data_plane_send_delay_s(total_bytes)
-            if send_time > 0:
-                yield self.env.timeout(send_time)
         for n in self.neighbors:
             io_requests += 1
             network_data += b.size
-            self.env.process(n._recv_block(b))
+            self.env.process(n.receive(b))
 
 
 class Miner:
@@ -248,31 +148,14 @@ class Miner:
 # ============================================================
 # Workload
 # ============================================================
-def tx_arrivals(env: simpy.Environment, wallets: int, tx_per_wallet: int, interval: float):
+def wallet(env: simpy.Environment, wid: int, count: int, interval: float):
     global pool_count, pool_deque, POOL_MODE
-
-    total_remaining = int(max(0, wallets) * max(0, tx_per_wallet))
-    if total_remaining <= 0:
-        return
-
-    if interval is None or interval <= 0:
-        if POOL_MODE == "count":
-            pool_count += total_remaining
-        else:
-            for _ in range(total_remaining):
-                pool_deque.append((-1, 0.0))
-        return
-
-    while total_remaining > 0:
+    for _ in range(count):
         yield env.timeout(interval)
-        batch = min(wallets, total_remaining)
         if POOL_MODE == "count":
-            pool_count += batch
+            pool_count += 1
         else:
-            now = env.now
-            for _ in range(batch):
-                pool_deque.append((-1, now))
-        total_remaining -= batch
+            pool_deque.append((wid, env.now))
 
 
 def pool_available() -> int:
@@ -326,7 +209,7 @@ def _mining_params(total_hash: float, S: int, target_bt: float, diff0: Optional[
 def coord(env, nodes, miners, target_bt, diff0, blocks_limit, total_blocksize,
           print_int, dbg, wallets, tx_per_wallet, init_reward, halving_interval,
           shards, tx_cost_ms, rtt_ms, coord_rounds, msg_cost, msg_size,
-          control_bw_mbps, broadcast_bw_mbps, overlap_broadcast, msg_proc_ms,
+          control_bw_mbps, overlap_broadcast, msg_proc_ms,
           quiet_blocks=False):
     global network_data, io_requests, total_tx, total_coins
 
@@ -391,7 +274,7 @@ def coord(env, nodes, miners, target_bt, diff0, blocks_limit, total_blocksize,
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
 
         if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
-            net_note = f"prop={PROP_MODEL}"
+            net_note = "prop=flood"
             print(
                 f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
                 f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
@@ -428,7 +311,7 @@ def winner_pairwise_phase(S: int, msg_size: int):
 def coord_no_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
                        total_blocksize, print_int, dbg, wallets, tx_per_wallet,
                        init_reward, halving_interval, shards, tx_cost_ms,
-                       msg_size, control_bw_mbps, broadcast_bw_mbps,
+                       msg_size, control_bw_mbps,
                        overlap_broadcast, msg_proc_ms, msg_cost, quiet_blocks=False):
     global network_data, io_requests, total_tx, total_coins
 
@@ -491,7 +374,7 @@ def coord_no_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
 
         if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
-            net_note = f"prop={PROP_MODEL}"
+            net_note = "prop=flood"
             print(
                 f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
                 f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
@@ -529,7 +412,7 @@ def to_leader_phase(S: int, msg_size: int):
 def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
                            total_blocksize, print_int, dbg, wallets, tx_per_wallet,
                            init_reward, halving_interval, shards, tx_cost_ms,
-                           msg_size, control_bw_mbps, broadcast_bw_mbps,
+                           msg_size, control_bw_mbps,
                            overlap_broadcast, msg_proc_ms, msg_cost,
                            verify_mode="leader", quiet_blocks=False):
     global network_data, io_requests, total_tx, total_coins
@@ -612,7 +495,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
 
         if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
-            net_note = f"prop={PROP_MODEL}"
+            net_note = "prop=flood"
             print(
                 f"[{env.now:.2f}] Block {bc} (leader shard={leader_idx}) "
                 f"tx={txs_next-1} dt={round_dt:.3f}s "
@@ -745,7 +628,6 @@ def main():
     p.add_argument("--cost", type=float, default=0.0)
     p.add_argument("--msg_size", type=int, default=200)
     p.add_argument("--control_bw_mbps", type=float, default=0.0)
-    p.add_argument("--broadcast_bw_mbps", type=float, default=0.0)
     p.add_argument("--overlap_broadcast", action="store_true")
     p.add_argument("--msg_proc_ms", type=float, default=1.0)
     p.add_argument("--print", dest="print_int", type=int, default=144)
@@ -758,10 +640,6 @@ def main():
                    choices=["leader", "shard", "leader_par"])
     p.add_argument("--pool_mode", type=str, default="count",
                    choices=["count", "deque"])
-    p.add_argument("--prop_model", type=str, default="exact",
-                   choices=["exact", "gossip", "analytic"])
-    p.add_argument("--gossip_fanout", type=int, default=16)
-    p.add_argument("--gossip_rounds", type=int, default=10)
     p.add_argument("--quiet_blocks", action="store_true")
     p.add_argument("--results_csv", type=str, default="")
     p.add_argument("--results_dir", type=str, default="Results")
@@ -799,17 +677,11 @@ def main():
     args.blocks_limit = blocks_limit
 
     # Globals setup
-    global LINK_RTT_MS, LINK_JITTER_MS, LINK_MSG_PROC_MS, CTRL_BW_MBPS, DATA_BW_MBPS
+    global LINK_RTT_MS, LINK_JITTER_MS, LINK_MSG_PROC_MS, CTRL_BW_MBPS
     LINK_RTT_MS      = float(args.rtt_ms or 0.0)
     LINK_JITTER_MS   = float(args.jitter_ms or 0.0)
     LINK_MSG_PROC_MS = float(args.msg_proc_ms or 0.0)
     CTRL_BW_MBPS     = float(args.control_bw_mbps or 0.0)
-    DATA_BW_MBPS     = float(args.broadcast_bw_mbps or 0.0)
-
-    global PROP_MODEL, GOSSIP_FANOUT, GOSSIP_ROUNDS
-    PROP_MODEL    = str(args.prop_model or "exact")
-    GOSSIP_FANOUT = int(args.gossip_fanout or 16)
-    GOSSIP_ROUNDS = int(args.gossip_rounds or 10)
 
     global POOL_MODE, pool_count, pool_deque
     POOL_MODE  = str(args.pool_mode or "count")
@@ -824,18 +696,16 @@ def main():
         if POOL_MODE == "count":
             pool_count = total_tx_need
         else:
-            for _ in range(total_tx_need):
-                pool_deque.append((-1, 0.0))
+            for wid in range(args.wallets or 0):
+                for _ in range(args.transactions or 0):
+                    pool_deque.append((wid, 0.0))
     else:
-        env.process(tx_arrivals(env, args.wallets or 0, args.transactions or 0, args.interval or 0.0))
+        for i in range(args.wallets or 0):
+            env.process(wallet(env, i, args.transactions or 0, args.interval or 0.0))
 
     # Nodes + graph
     nodes = [Node(env, i) for i in range(args.nodes or 0)]
     build_random_k_out_graph(nodes, int(args.neighbors or 0), seed=None)
-
-    global GLOBAL_N, GLOBAL_AVG_DEG
-    GLOBAL_N      = len(nodes)
-    GLOBAL_AVG_DEG = int(args.neighbors or 0)
 
     # Miners
     miners = [Miner(i, args.hashrate or 0.0) for i in range(args.miners or 0)]
@@ -852,7 +722,6 @@ def main():
                 init_reward=args.init_reward, halving_interval=args.halving_interval,
                 shards=args.shards, tx_cost_ms=args.tx_cost_ms,
                 msg_size=args.msg_size, control_bw_mbps=args.control_bw_mbps,
-                broadcast_bw_mbps=args.broadcast_bw_mbps,
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms, msg_cost=args.cost,
                 verify_mode=args.verify_mode, quiet_blocks=args.quiet_blocks,
@@ -869,7 +738,6 @@ def main():
                 init_reward=args.init_reward, halving_interval=args.halving_interval,
                 shards=args.shards, tx_cost_ms=args.tx_cost_ms,
                 msg_size=args.msg_size, control_bw_mbps=args.control_bw_mbps,
-                broadcast_bw_mbps=args.broadcast_bw_mbps,
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms, msg_cost=args.cost,
                 quiet_blocks=args.quiet_blocks,
@@ -888,7 +756,6 @@ def main():
                 rtt_ms=args.rtt_ms, coord_rounds=args.coord_rounds,
                 msg_cost=args.cost, msg_size=args.msg_size,
                 control_bw_mbps=args.control_bw_mbps,
-                broadcast_bw_mbps=args.broadcast_bw_mbps,
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms, quiet_blocks=args.quiet_blocks,
             )
