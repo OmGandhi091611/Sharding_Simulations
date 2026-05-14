@@ -116,7 +116,7 @@ class Block:
     def __init__(self, i: int, tx: int, dt: float):
         self.id = i
         self.tx = tx
-        self.size = HEADER_SIZE + tx * 256
+        self.size = HEADER_SIZE + tx * 128
         self.dt = dt
 
 
