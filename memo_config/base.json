@@ -1,8 +1,8 @@
 {
   "currency": "memo",
-  "nodes": 1000,
-  "neighbors": 500,
-  "miners": 1000,
+  "nodes": 100,
+  "neighbors": 50,
+  "miners": 100,
   "hashrate": 1000000,
   "wallets": 1024,
   "transactions": 1024,
