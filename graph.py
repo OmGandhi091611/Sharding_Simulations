@@ -137,8 +137,8 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 
 
 # ----------------------------
-# 2) Bubble chart -> non_sharded_graphs/
-#    (BTC hypothetical; label 4 corner bubbles with ONLY TPS)
+# 2) Heatmap -> non_sharded_graphs/
+#    X = block size, Y = configured blocktime, color = log10(TPS), inferno colormap
 # ----------------------------
 def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, show: bool):
     if not os.path.exists(non_csv):
@@ -155,122 +155,113 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         return None
 
     c_currency = pick_col(["currency"])
-    c_bs = pick_col(["block size", "block_size", "blocksize"])
-    c_abt = pick_col(["average block time", "avg block time", "avg_block_time"])
-    c_tps = pick_col(["tps"])
+    c_bs       = pick_col(["block size", "block_size", "blocksize"])
+    c_abt      = pick_col(["average block time", "avg block time", "avg_block_time"])
+    c_bt_cfg   = pick_col(["blocktime in configuration file", "configured blocktime", "blocktime"])
+    c_tps      = pick_col(["tps"])
 
-    missing = []
-    if c_currency is None:
-        missing.append("currency")
-    if c_bs is None:
-        missing.append("block size")
-    if c_abt is None:
-        missing.append("average block time")
-    if c_tps is None:
-        missing.append("tps")
-
+    missing = [n for n, c in [("currency", c_currency), ("block size", c_bs),
+                               ("average block time", c_abt), ("blocktime in configuration file", c_bt_cfg),
+                               ("tps", c_tps)] if c is None]
     if missing:
         print(f"[skip] non-sharded CSV missing required columns: {missing}")
         print("Columns seen:", df.columns.tolist())
         return
 
     df[c_currency] = (
-        df[c_currency]
-        .astype(str)
+        df[c_currency].astype(str)
         .str.replace("\ufeff", "", regex=False)
-        .str.lower()
-        .str.strip()
+        .str.lower().str.strip()
     )
-
     df = df[df[c_currency].eq("btc_hypothetical")].copy()
     if df.empty:
         print("[skip] non-sharded CSV has no rows for btc_hypothetical")
         return
 
-    df[c_bs] = pd.to_numeric(df[c_bs], errors="coerce")
-    df[c_abt] = pd.to_numeric(df[c_abt], errors="coerce")
-    df[c_tps] = pd.to_numeric(df[c_tps], errors="coerce")
-
-    df = df.dropna(subset=[c_bs, c_abt, c_tps])
+    for c in [c_bs, c_abt, c_bt_cfg, c_tps]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=[c_bs, c_abt, c_bt_cfg, c_tps])
     if df.empty:
-        print("[skip] BTC bubble plot has no usable rows after numeric coercion")
+        print("[skip] BTC heatmap has no usable rows after numeric coercion")
         return
 
-    df["bs"] = df[c_bs].astype(float).round().astype(int)
+    df["bs"]      = df[c_bs].astype(float).round().astype(int)
+    df["bt_cfg"]  = df[c_bt_cfg].astype(float).round().astype(int)
+    df["abt"]     = df[c_abt].astype(float)
+    df["tps_val"] = df[c_tps].astype(float)
 
-    base_block_sizes = sorted(df["bs"].unique().tolist())
-    if not base_block_sizes:
-        print("[skip] BTC data has no valid block sizes")
-        return
+    block_sizes = sorted(df["bs"].unique().tolist())
+    bt_cfgs     = sorted(df["bt_cfg"].unique().tolist())
 
-    x_positions = {bs: i * 2 for i, bs in enumerate(base_block_sizes)}
-    xticks = [x_positions[bs] for bs in base_block_sizes]
-    xticklabels = [str(bs) for bs in base_block_sizes]
+    pivot     = df.pivot_table(index="bt_cfg", columns="bs", values="tps_val", aggfunc="mean")
+    pivot_abt = df.pivot_table(index="bt_cfg", columns="bs", values="abt",     aggfunc="mean")
+    pivot     = pivot.loc[bt_cfgs]
+    pivot_abt = pivot_abt.loc[bt_cfgs]
 
-    max_tps = float(df[c_tps].max()) if float(df[c_tps].max()) > 0 else 1.0
-    target_max_area = 1600.0
-    scale = target_max_area / max_tps
-    min_area = 60.0
+    # Mask cells where configured blocktime < minimum actual avg block time for that block size
+    min_abt_per_bs = df.groupby("bs")["abt"].min()
+    tps_masked = pivot.values.astype(float).copy()
+    for j, bs in enumerate(block_sizes):
+        for i, bt in enumerate(bt_cfgs):
+            if bt < min_abt_per_bs[bs]:
+                tps_masked[i, j] = np.nan
 
-    plt.figure(figsize=(12, 7))
+    log_vals = np.log10(np.where(np.isnan(tps_masked), np.nan, tps_masked.clip(min=1e-9)))
+    masked   = np.ma.masked_invalid(log_vals)
 
-    sub = df.sort_values("bs").copy()
-    x = np.array([x_positions[int(v)] for v in sub["bs"].to_numpy(dtype=float)], dtype=float)
-    y = sub[c_abt].to_numpy(dtype=float)
-    s = (sub[c_tps].to_numpy(dtype=float) * scale) + min_area
+    n_y, n_x = len(bt_cfgs), len(block_sizes)
+    x_edges  = np.arange(n_x + 1) - 0.5
+    y_edges  = np.arange(n_y + 1) - 0.5
 
-    plt.scatter(
-        x, y,
-        s=s,
-        alpha=0.6,
-        label="btc_hypothetical",
-        edgecolors="black",
-        linewidth=0.7,
-    )
+    cmap = plt.cm.RdYlGn.copy()
+    cmap.set_bad("black")
 
-    bs_min = int(sub["bs"].min())
-    bs_max = int(sub["bs"].max())
+    fig, ax = plt.subplots(figsize=(14, 10))
+    ax.set_facecolor("black")
 
-    def fmt_float(v, nd=0):
-        try:
-            return f"{float(v):.{nd}f}"
-        except Exception:
-            return str(v)
+    im = ax.pcolormesh(x_edges, y_edges, masked, cmap=cmap, shading="flat")
 
-    def annotate_row(row, dx=0.8, dy=0.0):
-        xi = float(x_positions[int(row["bs"])])
-        yi = float(row[c_abt])
-        tps_val = row[c_tps]
-        label = f"TPS={fmt_float(tps_val, 0)}"
-        plt.annotate(
-            label,
-            xy=(xi, yi),
-            xytext=(xi + dx, yi + dy),
-            textcoords="data",
-            fontsize=10,
-            ha="left",
-            va="center",
-            arrowprops=dict(arrowstyle="->", lw=1.0),
-        )
+    ax.set_xlim(x_edges[0], x_edges[-1])
+    ax.set_ylim(y_edges[0], y_edges[-1])
 
-    sub_min = sub[sub["bs"] == bs_min]
-    if not sub_min.empty:
-        annotate_row(sub_min.loc[sub_min[c_abt].idxmin()], dx=0.8)
-        annotate_row(sub_min.loc[sub_min[c_abt].idxmax()], dx=0.8)
+    ax.set_xticks(range(n_x))
+    ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=16)
+    ax.set_yticks(range(n_y))
+    ax.set_yticklabels([f"{bt}s" for bt in bt_cfgs], fontsize=16)
 
-    sub_max = sub[sub["bs"] == bs_max]
-    if not sub_max.empty:
-        annotate_row(sub_max.loc[sub_max[c_abt].idxmin()], dx=0.8)
-        annotate_row(sub_max.loc[sub_max[c_abt].idxmax()], dx=0.8)
+    norm = plt.matplotlib.colors.Normalize(vmin=np.nanmin(log_vals), vmax=np.nanmax(log_vals))
+    for i in range(n_y):
+        for j in range(n_x):
+            tps_val = tps_masked[i, j]
+            if np.isnan(tps_val):
+                raw_tps = pivot.values[i, j]
+                raw_abt = pivot_abt.values[i, j]
+                if not np.isnan(raw_tps):
+                    tps_str = f"{raw_tps:.0f}" if raw_tps < 1000 else f"{raw_tps/1000:.1f}k"
+                    ax.text(j, i, f"{tps_str} TPS\n{raw_abt:.0f}s", ha="center", va="center",
+                            fontsize=12, color="white", linespacing=1.4)
+                continue
+            abt_val    = pivot_abt.values[i, j]
+            brightness = norm(log_vals[i, j])
+            txt_color  = "white" if brightness < 0.45 else "black"
+            tps_str    = f"{tps_val:.0f}" if tps_val < 1000 else f"{tps_val/1000:.1f}k"
+            ax.text(j, i, f"{tps_str} TPS\n{abt_val:.0f}s", ha="center", va="center",
+                    fontsize=12, color=txt_color, linespacing=1.4)
 
-    plt.xticks(xticks, xticklabels, rotation=45)
-    plt.xlabel("Block size (transactions per block)")
-    plt.ylabel("Average block time (s)")
-    plt.title("TPS as Bubble Size over Block Size vs Average Block Time (BTC hypothetical)")
-    plt.grid(True, linestyle="--", alpha=0.35)
-    plt.legend(title="Chain", loc="upper left")
+    ax.set_xlabel("Block Size (tx/block)", fontsize=17)
+    ax.set_ylabel("Configured Block Time (s)", fontsize=17)
+    ax.set_title("TPS Heatmap — BTC Hypothetical (Non-Sharded)", fontsize=18)
 
-    savefig(outdir, "bubble_tps_blocktime_vs_blocksize_btc_hypothetical.png")
+    cbar = plt.colorbar(im, ax=ax, label="TPS")
+    cbar.set_label("TPS", fontsize=17)
+    cbar.ax.tick_params(labelsize=15)
+    log_min = int(np.floor(np.nanmin(log_vals)))
+    log_max = int(np.ceil(np.nanmax(log_vals)))
+    ticks   = list(range(log_min, log_max + 1))
+    cbar.set_ticks(ticks)
+    cbar.set_ticklabels([f"$10^{{{t}}}$" for t in ticks])
+
+    savefig(outdir, "heatmap_tps_blocktime_vs_blocksize_btc_hypothetical.png")
     if show:
         plt.show()
     else:

@@ -84,9 +84,11 @@ def build_grid() -> List[Dict[str, Any]]:
     for shards, blocksize, blocktime in itertools.product(
             SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES):
 
-        nodes     = {128: 256, 256: 512, 512: 1000}.get(shards, 100)
-        miners    = nodes
-        neighbors = min(50, nodes - 1)
+        nodes        = {128: 256, 256: 512, 512: 1000}.get(shards, 100)
+        miners       = nodes
+        neighbors    = min(50, nodes - 1)
+        transactions = blocksize * 200
+        wallets      = transactions
 
         name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}".replace(".", "p")
         combos.append({
@@ -97,6 +99,8 @@ def build_grid() -> List[Dict[str, Any]]:
             "nodes":           nodes,
             "miners":          miners,
             "neighbors":       neighbors,
+            "transactions":    transactions,
+            "wallets":         wallets,
         })
     return combos
 
@@ -129,6 +133,9 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--nodes",           str(combo["nodes"])]
     cmd += ["--miners",          str(combo["miners"])]
     cmd += ["--neighbors",       str(combo["neighbors"])]
+    cmd += ["--transactions",    str(combo["transactions"])]
+    cmd += ["--wallets",         str(combo["wallets"])]
+    cmd += ["--blocks",          "200"]
 
     # Suppress per-block prints - too noisy for hundreds of runs
     cmd += ["--quiet_blocks"]
