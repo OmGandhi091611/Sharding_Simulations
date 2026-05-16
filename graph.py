@@ -494,6 +494,129 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
 
 # ----------------------------
+# 4b) MEMO Messages vs Shards -> memo_msg_graphs/
+# ----------------------------
+def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
+    if not os.path.exists(memo_csv):
+        print(f"[skip] memo CSV not found: {memo_csv}")
+        return
+
+    df = pd.read_csv(memo_csv, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    c_shards = _pick_col(df, ["shards"])
+    c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
+    c_msgs   = _pick_col(df, ["messages"])
+    c_bt_cfg = _pick_col(df, [
+        "blocktime in configuration file",
+        "configured blocktime",
+        "config blocktime",
+        "blocktime",
+        "block time",
+    ])
+
+    missing = [n for n, c in [("shards", c_shards), ("block size", c_bs),
+                               ("messages", c_msgs), ("blocktime in configuration file", c_bt_cfg)]
+               if c is None]
+    if missing:
+        print(f"[skip] memo CSV missing required columns for messages plot: {missing}")
+        return
+
+    for c in [c_shards, c_bs, c_msgs, c_bt_cfg]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=[c_shards, c_bs, c_msgs, c_bt_cfg]).copy()
+    if df.empty:
+        print("[skip] memo CSV has no usable rows for messages plot")
+        return
+
+    df["shards_int"]     = df[c_shards].astype(int)
+    df["block_size_int"] = df[c_bs].astype(int)
+    df["blocktime_cfg"]  = df[c_bt_cfg].astype(float).round(6)
+    df["messages_val"]   = df[c_msgs].astype(float)
+
+    plot_df = (
+        df[["block_size_int", "blocktime_cfg", "shards_int", "messages_val"]]
+        .drop_duplicates(subset=["block_size_int", "blocktime_cfg", "shards_int"], keep="first")
+        .sort_values(["block_size_int", "blocktime_cfg", "shards_int"])
+    )
+
+    block_sizes    = sorted(plot_df["block_size_int"].unique().tolist(), reverse=True)
+    all_blocktimes = sorted(plot_df["blocktime_cfg"].unique().tolist())
+    all_shards     = sorted(plot_df["shards_int"].unique().tolist())
+
+    x_positions  = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks       = [x_positions[s] for s in all_shards]
+    xticklabels  = [str(s) for s in all_shards]
+
+    groups      = [block_sizes[:4], block_sizes[4:]]
+    group_names = ["memo_messages_vs_shards_part1.png", "memo_messages_vs_shards_part2.png"]
+    group_grids = [(2, 2), (2, 3)]
+
+    for group_idx, bs_group in enumerate(groups):
+        bs_group = [b for b in bs_group if b in block_sizes]
+        if not bs_group:
+            continue
+
+        rows, cols = group_grids[group_idx]
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), sharey=False)
+        axes = np.array(axes).reshape(-1)
+
+        legend_handles = legend_labels = None
+
+        for i, bs in enumerate(bs_group):
+            ax  = axes[i]
+            sub = plot_df[plot_df["block_size_int"] == bs].copy()
+            if sub.empty:
+                ax.axis("off")
+                continue
+
+            for bt in all_blocktimes:
+                line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
+                if line_df.empty:
+                    continue
+                x_vals = [x_positions[s] for s in line_df["shards_int"]]
+                ax.plot(x_vals, line_df["messages_val"],
+                        marker="o", linewidth=1.8, markersize=4,
+                        label=f"BT={bt:g}s")
+
+            ax.set_title(f"Block Size = {bs:,}")
+            ax.set_xlabel("Number of Shards")
+            ax.set_xticks(xticks)
+            ax.set_xticklabels(xticklabels)
+            ax.grid(True, linestyle="--", alpha=0.35)
+
+            if i % cols == 0:
+                ax.set_ylabel("Messages")
+
+            if legend_handles is None:
+                legend_handles, legend_labels = ax.get_legend_handles_labels()
+
+        for j in range(len(bs_group), len(axes)):
+            axes[j].axis("off")
+
+        fig.suptitle("MEMO: Messages vs Number of Shards", fontsize=13)
+        fig.tight_layout(rect=[0, 0.10, 1, 0.95])
+
+        if legend_handles:
+            fig.legend(legend_handles, legend_labels,
+                       loc="lower center",
+                       ncol=min(6, len(legend_labels)),
+                       bbox_to_anchor=(0.5, 0.01),
+                       frameon=True, fontsize=8)
+
+        safe_mkdir(outdir)
+        fig.savefig(os.path.join(outdir, group_names[group_idx]), dpi=300, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        print(f"[done] {outdir}/{group_names[group_idx]}")
+
+
+# ----------------------------
 # 4) NEAR vs targets -> near_graphs/
 # ----------------------------
 def run_near_vs_targets(near_csv: str, outdir: str, show: bool):
@@ -572,6 +695,7 @@ def main():
 
     ap.add_argument("--near_out", default="near_graphs", help="Output folder for NEAR graphs")
     ap.add_argument("--memo_out", default="memo_graphs", help="Output folder for MEMO graphs")
+    ap.add_argument("--memo_msg_out", default="memo_msg_graphs", help="Output folder for MEMO messages vs shards graphs")
     ap.add_argument("--non_out", default="non_sharded_graphs", help="Output folder for non-sharded graphs")
     ap.add_argument("--val_out", default="Validations", help="Output folder for validation graphs")
 
@@ -582,6 +706,7 @@ def main():
 
     ap.add_argument("--skip_near", action="store_true")
     ap.add_argument("--skip_memo", action="store_true")
+    ap.add_argument("--skip_memo_msg", action="store_true")
     ap.add_argument("--skip_non", action="store_true")
     ap.add_argument("--skip_validation", action="store_true")
 
@@ -595,6 +720,7 @@ def main():
 
     safe_mkdir(args.near_out)
     safe_mkdir(args.memo_out)
+    safe_mkdir(args.memo_msg_out)
     safe_mkdir(args.non_out)
     safe_mkdir(args.val_out)
 
@@ -603,6 +729,9 @@ def main():
 
     if not args.skip_memo:
         run_memo_per_blocksize(memo_csv, args.memo_out, show=show)
+
+    if not args.skip_memo_msg:
+        run_memo_messages_vs_shards(memo_csv, args.memo_msg_out, show=show)
 
     if not args.skip_non:
         run_bubble_nonsharded_vs_memo_s1(non_csv, memo_csv, args.non_out, show=show)

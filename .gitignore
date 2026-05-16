@@ -1,5 +1,9 @@
 # macOS resource fork files
 ._*
 
+# Python
+__pycache__/
+*.pyc
+
 # Claude Code
 .claude/
