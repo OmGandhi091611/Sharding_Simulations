@@ -54,12 +54,57 @@ sim_summary = {}      # final compact summary
 
 HEADER_SIZE = 1024
 YEAR = 365 * 24 * 3600
+TX_BYTES = 128          # per-transaction wire size; overridden by --sig_scheme
 
 # Network model knobs (set from CLI)
 LINK_RTT_MS = 0.0       # logical RTT
 LINK_JITTER_MS = 0.0    # extra jitter (one-way)
 LINK_MSG_PROC_MS = 0.0  # CPU per received message
 CTRL_BW_MBPS = 0.0      # control NIC throughput
+
+
+# ============================================================
+# Signature scheme benchmarks
+#
+# tx_cost_ms : verification time per transaction (milliseconds)
+# sig_bytes  : signature size in bytes
+# tx_bytes   : total per-transaction wire size (signature + pubkey + payload)
+#
+# Sources:
+#   ed25519      — Bernstein et al., SUPERCOP benchmarks, ~134K cycles @ 2.6 GHz
+#                  https://bench.cr.yp.to/results-sign.html
+#   dilithium2   — Ducas et al., CRYSTALS-Dilithium NIST PQC Round 3 spec, Table 2:
+#                  ~145K verify cycles @ 2.6 GHz; sig=2420 B, pk=1312 B
+#                  https://pq-crystals.org/dilithium/
+#   falcon512    — Fouque et al., FALCON NIST PQC Round 3 spec:
+#                  ~36K verify cycles @ 2.6 GHz (fastest PQ verify); sig≈666 B avg, pk=897 B
+#                  https://falcon-sign.info/
+#   sphincs_sha2_128s — Bernstein et al., SPHINCS+ NIST PQC Round 3 spec:
+#                  ~2.7M verify cycles @ 2.6 GHz; sig=7856 B, pk=32 B
+#                  https://sphincs.org/
+# ============================================================
+SIG_SCHEMES = {
+    "ed25519": {
+        "tx_cost_ms": 0.05,
+        "sig_bytes":  64,
+        "tx_bytes":   128,
+    },
+    "dilithium2": {
+        "tx_cost_ms": 0.06,
+        "sig_bytes":  2420,
+        "tx_bytes":   2500,
+    },
+    "falcon512": {
+        "tx_cost_ms": 0.014,
+        "sig_bytes":  666,
+        "tx_bytes":   750,
+    },
+    "sphincs_sha2_128s": {
+        "tx_cost_ms": 1.04,
+        "sig_bytes":  7856,
+        "tx_bytes":   7950,
+    },
+}
 
 
 # ============================================================
@@ -116,7 +161,7 @@ class Block:
     def __init__(self, i: int, tx: int, dt: float):
         self.id = i
         self.tx = tx
-        self.size = HEADER_SIZE + tx * 128
+        self.size = HEADER_SIZE + tx * TX_BYTES
         self.dt = dt
 
 
@@ -621,6 +666,10 @@ def main():
     p.add_argument("--halving", dest="halving_interval", type=int, default=210000)
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--total-blocksize", dest="total_blocksize", type=int, default=4096)
+    p.add_argument("--sig_scheme", type=str, default=None,
+                   choices=["ed25519", "dilithium2", "falcon512", "sphincs_sha2_128s"],
+                   help="Signature scheme; sets tx_cost_ms and tx_bytes from published benchmarks. "
+                        "Overridden by --tx_cost_ms if that flag is also passed explicitly.")
     p.add_argument("--tx_cost_ms", type=float, default=1.0)
     p.add_argument("--rtt_ms", type=float, default=0.0)
     p.add_argument("--jitter_ms", type=float, default=1.0)
@@ -675,6 +724,21 @@ def main():
     if blocks_limit is None and args.years:
         blocks_limit = int(args.years * YEAR / (args.blocktime or 1))
     args.blocks_limit = blocks_limit
+
+    # Apply signature scheme if given and --tx_cost_ms / --msg_size were not explicit
+    global TX_BYTES
+    if args.sig_scheme:
+        scheme = SIG_SCHEMES[args.sig_scheme]
+        TX_BYTES = scheme["tx_bytes"]
+        if "tx_cost_ms" not in cli_provided:
+            args.tx_cost_ms = scheme["tx_cost_ms"]
+        if "msg_size" not in cli_provided:
+            args.msg_size = scheme["sig_bytes"]
+        print(f"[sig_scheme] {args.sig_scheme}: "
+              f"tx_cost_ms={args.tx_cost_ms}ms  "
+              f"sig_bytes={scheme['sig_bytes']}B  "
+              f"tx_bytes={TX_BYTES}B  "
+              f"msg_size={args.msg_size}B")
 
     # Globals setup
     global LINK_RTT_MS, LINK_JITTER_MS, LINK_MSG_PROC_MS, CTRL_BW_MBPS
@@ -794,7 +858,7 @@ def main():
     PAPER_CSV_HEADER = [
         "currency", "nodes", "wallets", "miners", "transactions", "interval",
         "shards", "average block time", "block size", "messages", "mode", "tps",
-        "no. of blocks generated", "blocktime in configuration file",
+        "no. of blocks generated", "blocktime in configuration file", "sig_scheme",
     ]
 
     def upsert_paper_csv_row(results_path: str, row: dict):
@@ -802,7 +866,7 @@ def main():
         path.parent.mkdir(parents=True, exist_ok=True)
 
         key_fields = ["currency", "shards", "block size", "mode",
-                      "blocktime in configuration file"]
+                      "blocktime in configuration file", "sig_scheme"]
 
         def row_key(r: dict):
             return tuple(str(r.get(k, "")) for k in key_fields)
@@ -882,6 +946,7 @@ def main():
         "tps":                               float(tps),
         "no. of blocks generated":           int(blocks),
         "blocktime in configuration file":   float(args.blocktime),
+        "sig_scheme":                        str(args.sig_scheme or ""),
     }
 
     print("\n===== PAPER CSV Row =====")

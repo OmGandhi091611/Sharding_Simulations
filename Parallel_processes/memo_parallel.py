@@ -30,13 +30,20 @@ BASE_CONFIG = str(ROOT / "memo_config/base.json")
 LOG_DIR     = str(ROOT / "memo_logs")
 RESULTS_DIR = str(ROOT / "Results")
 RUNS_DIR    = os.path.join(RESULTS_DIR, "runs")
-FINAL_CSV   = os.path.join(RESULTS_DIR, "memo_results.csv")
 MERGE_BIN   = str(ROOT / "merge_results")
 
 # ------------------------------------------------------------------ #
 # GRID — edit these three lists to define your parameter space
 # ------------------------------------------------------------------ #
 SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+
+# Signature schemes to sweep — comment out any you don't want to run
+SIG_SCHEMES = [
+    "ed25519",
+    "dilithium2",
+    "falcon512",
+    "sphincs_sha2_128s",
+]
 
 BLOCK_SIZES = [
     1024,
@@ -93,8 +100,8 @@ MAX_WORKERS = int(os.environ.get(
 
 def build_grid() -> List[Dict[str, Any]]:
     combos = []
-    for shards, blocksize, blocktime in itertools.product(
-            SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES):
+    for shards, blocksize, blocktime, sig in itertools.product(
+            SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES, SIG_SCHEMES):
 
         nodes        = {128: 256, 256: 512, 512: 1000}.get(shards, 100)
         miners       = nodes
@@ -102,7 +109,7 @@ def build_grid() -> List[Dict[str, Any]]:
         transactions = blocksize * 200
         wallets      = transactions
 
-        name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}".replace(".", "p")
+        name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}_{sig}".replace(".", "p")
         combos.append({
             "name":            name,
             "shards":          shards,
@@ -113,6 +120,7 @@ def build_grid() -> List[Dict[str, Any]]:
             "neighbors":       neighbors,
             "transactions":    transactions,
             "wallets":         wallets,
+            "sig_scheme":      sig,
         })
     return combos
 
@@ -148,6 +156,7 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--transactions",    str(combo["transactions"])]
     cmd += ["--wallets",         str(combo["wallets"])]
     cmd += ["--blocks",          "200"]
+    cmd += ["--sig_scheme",      combo["sig_scheme"]]
 
     # Suppress per-block prints - too noisy for hundreds of runs
     cmd += ["--quiet_blocks"]
@@ -244,22 +253,24 @@ class WorkerPool:
 # Merge
 # ------------------------------------------------------------------ #
 
-def merge_run_csvs(runs_dir: str, final_csv: str) -> bool:
-    csvs = sorted(Path(runs_dir).glob("*.csv"))
-    if not csvs:
-        print("[merge] No per-run CSVs found - nothing to merge.")
-        return False
+def merge_run_csvs_by_scheme(runs_dir: str):
+    for scheme in SIG_SCHEMES:
+        final_csv = os.path.join(RESULTS_DIR, f"memo_results_{scheme}.csv")
+        csvs = sorted(Path(runs_dir).glob(f"*_{scheme}.csv"))
+        if not csvs:
+            print(f"[merge] No per-run CSVs found for {scheme} - skipping.")
+            continue
 
-    if not os.path.exists(MERGE_BIN):
-        print(f"[merge] '{MERGE_BIN}' not found - using Python fallback. "
-              "Compile with: gcc -O2 -pthread merge_results.c -o merge_results")
-        _python_fallback_merge(csvs, final_csv)
-        return True
+        if not os.path.exists(MERGE_BIN):
+            print(f"[merge] '{MERGE_BIN}' not found - using Python fallback. "
+                  "Compile with: gcc -O2 -fopenmp merge_results.c -o merge_results")
+            _python_fallback_merge(csvs, final_csv)
+        else:
+            cmd = [MERGE_BIN, final_csv] + [str(p) for p in csvs]
+            print(f"[merge] Merging {len(csvs)} files -> {final_csv}")
+            subprocess.run(cmd)
 
-    cmd = [MERGE_BIN, final_csv] + [str(p) for p in csvs]
-    print(f"[merge] Merging {len(csvs)} files -> {final_csv}")
-    ret = subprocess.run(cmd)
-    return ret.returncode == 0
+        print(f"[merge] Done -> {final_csv}")
 
 
 def _python_fallback_merge(csvs, final_csv):
@@ -303,12 +314,13 @@ def main():
     print(f"  Shards      : {SHARD_COUNTS}")
     print(f"  Block sizes : {BLOCK_SIZES}")
     print(f"  Block times : {BLOCK_TIMES}")
+    print(f"  Sig schemes : {SIG_SCHEMES}")
     print(f"  Total runs  : {total}")
     print(f"  Workers     : {MAX_WORKERS}  (set GRID_WORKERS=N to override)")
     print(f"  Base config : {BASE_CONFIG}")
     print(f"  Logs        : {LOG_DIR}/")
     print(f"  Per-run CSVs: {RUNS_DIR}/")
-    print(f"  Final CSV   : {FINAL_CSV}")
+    print(f"  Final CSVs  : " + ", ".join(f"memo_results_{s}.csv" for s in SIG_SCHEMES))
     print()
 
     if not os.path.exists(BASE_CONFIG):
@@ -328,8 +340,8 @@ def main():
         print(f"  Failed IDs: {failed[:20]}{'...' if len(failed) > 20 else ''}")
 
     print()
-    merge_run_csvs(RUNS_DIR, FINAL_CSV)
-    print(f"\nDone. Results -> {FINAL_CSV}")
+    merge_run_csvs_by_scheme(RUNS_DIR)
+    print(f"\nDone. Results -> Results/memo_results_<scheme>.csv")
 
 
 if __name__ == "__main__":

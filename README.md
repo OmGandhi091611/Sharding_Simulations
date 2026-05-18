@@ -310,27 +310,12 @@ python graph.py --results_dir Results --no_show
 ### Generate MEMO plots only (all three network conditions)
 
 ```bash
-# Local
-python graph.py \
-  --memo_csv memo_results_local.csv \
-  --memo_out memo_graphs_local \
-  --memo_msg_out memo_graphs_local \
-  --skip_near --skip_non --skip_validation --no_show
-
-# US WAN
-python graph.py \
-  --memo_csv memo_results_usa.csv \
-  --memo_out memo_graphs_usa \
-  --memo_msg_out memo_graphs_usa \
-  --skip_near --skip_non --skip_validation --no_show
-
-# Global WAN
-python graph.py \
-  --memo_csv memo_results_global.csv \
-  --memo_out memo_graphs_global \
-  --memo_msg_out memo_graphs_global \
-  --skip_near --skip_non --skip_validation --no_show
+python graph.py --memo_csv memo_results_local.csv  --memo_out memo_graphs_local  --memo_msg_out memo_graphs_local  --skip_near --skip_non --skip_validation --no_show && \
+python graph.py --memo_csv memo_results_usa.csv    --memo_out memo_graphs_usa    --memo_msg_out memo_graphs_usa    --skip_near --skip_non --skip_validation --no_show && \
+python graph.py --memo_csv memo_results_global.csv --memo_out memo_graphs_global --memo_msg_out memo_graphs_global --skip_near --skip_non --skip_validation --no_show
 ```
+
+> Pass only the filename to `--memo_csv` (not the full path) — `graph.py` prepends `--results_dir` (`Results/`) automatically.
 
 ### All arguments
 

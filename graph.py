@@ -12,13 +12,13 @@ No cross_compare_graphs. No extra "plots/" folder.
 
 Update:
 - Bubble chart labels ONLY TPS for the 4 corner bubbles.
-- MEMO graphs now use:
+- New sharded design graphs now use:
     x = number of shards (uniform spacing, 2 units apart)
     y = TPS
     part1: 2x2 grid (4 largest block sizes)
     part2: 2x3 grid (remaining block sizes)
     one line per configured blocktime
-- MEMO uses unique TPS values directly from CSV, no averaging.
+- New sharded design uses unique TPS values directly from CSV, no averaging.
 """
 
 import argparse
@@ -269,7 +269,7 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
 
 
 # ----------------------------
-# 3) MEMO faceted TPS-vs-shards -> memo_graphs/
+# 3) New sharded design faceted TPS-vs-shards -> memo_graphs/
 #    part1: 2x2 grid (4 largest block sizes)
 #    part2: 2x3 grid (remaining block sizes)
 #    one line per configured blocktime
@@ -323,7 +323,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
     dup_count = df.duplicated(subset=["block_size_int", "blocktime_cfg", "shards_int"]).sum()
     if dup_count > 0:
-        print(f"[warn] Found {dup_count} duplicate MEMO config rows; keeping first occurrence")
+        print(f"[warn] Found {dup_count} duplicate new sharded design config rows; keeping first occurrence")
 
     plot_df = df[["block_size_int", "blocktime_cfg", "shards_int", "tps_val"]].copy()
     plot_df = plot_df.drop_duplicates(
@@ -400,7 +400,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
         for j in range(len(bs_group), len(axes)):
             axes[j].axis("off")
 
-        fig.suptitle("MEMO: TPS vs Number of Shards", fontsize=13)
+        fig.suptitle("New Sharded Design: TPS vs Number of Shards", fontsize=13)
 
         # Reserve space at bottom for legend, top for suptitle
         fig.tight_layout(rect=[0, 0.10, 1, 0.95])
@@ -484,7 +484,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                 frameon=True
             )
 
-        fig.suptitle("MEMO: TPS vs Number of Shards by Block Size and Blocktime", y=1.06, fontsize=13)
+        fig.suptitle("New Sharded Design: TPS vs Number of Shards by Block Size and Blocktime", y=1.06, fontsize=13)
         savefig(outdir, "memo_tps_vs_shards_all_blocksizes.png")
 
         if show:
@@ -494,7 +494,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
 
 # ----------------------------
-# 4b) MEMO Messages vs Shards -> memo_msg_graphs/
+# 4b) New sharded design Messages vs Shards -> memo_msg_graphs/
 # ----------------------------
 def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
     if not os.path.exists(memo_csv):
@@ -595,7 +595,7 @@ def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
         for j in range(len(bs_group), len(axes)):
             axes[j].axis("off")
 
-        fig.suptitle("MEMO: Messages vs Number of Shards", fontsize=13)
+        fig.suptitle("New Sharded Design: Messages vs Number of Shards", fontsize=13)
         fig.tight_layout(rect=[0, 0.10, 1, 0.95])
 
         if legend_handles:
@@ -694,8 +694,8 @@ def main():
     ap.add_argument("--results_dir", default="Results", help="Folder containing the CSVs")
 
     ap.add_argument("--near_out", default="near_graphs", help="Output folder for NEAR graphs")
-    ap.add_argument("--memo_out", default="memo_graphs", help="Output folder for MEMO graphs")
-    ap.add_argument("--memo_msg_out", default="memo_msg_graphs", help="Output folder for MEMO messages vs shards graphs")
+    ap.add_argument("--memo_out", default="memo_graphs", help="Output folder for new sharded design graphs")
+    ap.add_argument("--memo_msg_out", default="memo_msg_graphs", help="Output folder for new sharded design messages vs shards graphs")
     ap.add_argument("--non_out", default="non_sharded_graphs", help="Output folder for non-sharded graphs")
     ap.add_argument("--val_out", default="Validations", help="Output folder for validation graphs")
 
@@ -709,14 +709,16 @@ def main():
     ap.add_argument("--skip_memo_msg", action="store_true")
     ap.add_argument("--skip_non", action="store_true")
     ap.add_argument("--skip_validation", action="store_true")
+    ap.add_argument("--skip_sig_schemes", action="store_true",
+                    help="Skip per-signature-scheme plot generation")
 
     args = ap.parse_args()
     show = not args.no_show
 
     near_csv = os.path.join(args.results_dir, args.near_csv)
     memo_csv = os.path.join(args.results_dir, args.memo_csv)
-    non_csv = os.path.join(args.results_dir, args.non_csv)
-    val_csv = os.path.join(args.results_dir, args.validation_csv)
+    non_csv  = os.path.join(args.results_dir, args.non_csv)
+    val_csv  = os.path.join(args.results_dir, args.validation_csv)
 
     safe_mkdir(args.near_out)
     safe_mkdir(args.memo_out)
@@ -739,6 +741,20 @@ def main():
     if not args.skip_validation:
         run_validation(val_csv, args.val_out, show=show)
 
+    # Per-signature-scheme plots
+    _SIG_SCHEMES = ["ed25519", "dilithium2", "falcon512", "sphincs_sha2_128s"]
+    if not args.skip_sig_schemes:
+        for scheme in _SIG_SCHEMES:
+            scheme_csv = os.path.join(args.results_dir, f"memo_results_{scheme}.csv")
+            if not os.path.exists(scheme_csv):
+                print(f"[skip] {scheme_csv} not found — run memo_parallel.py first")
+                continue
+            out_dir = f"memo_graphs_{scheme}"
+            safe_mkdir(out_dir)
+            run_memo_per_blocksize(scheme_csv, out_dir, show=show)
+            run_memo_messages_vs_shards(scheme_csv, out_dir, show=show)
+            print(f"[done] {scheme} -> {out_dir}/")
+
     print("\nDone.")
     print("Inputs read from:")
     print(f" - {near_csv}")
@@ -751,6 +767,9 @@ def main():
     print(f" - {args.memo_out}/")
     print(f" - {args.non_out}/ (bubble)")
     print(f" - {args.val_out}/ (validation)")
+    if not args.skip_sig_schemes:
+        for scheme in _SIG_SCHEMES:
+            print(f" - memo_graphs_{scheme}/")
 
 
 if __name__ == "__main__":
