@@ -40,9 +40,9 @@ SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 # Signature schemes to sweep — comment out any you don't want to run
 SIG_SCHEMES = [
     "ed25519",
-    "dilithium2",
-    "falcon512",
-    "sphincs_sha2_128s",
+    # "dilithium2",
+    # "falcon512",
+    # "sphincs_sha2_128s",
 ]
 
 BLOCK_SIZES = [
@@ -73,13 +73,6 @@ BLOCK_TIMES = [
     0.5859375,
     0.29296875,
     0.146484375,
-    0.0732421875,
-    0.03662109375,
-    0.01831054688,
-    0.009155273438,
-    0.004577636719,
-    0.002288818359,
-    0.00114440918
 ]
 
 
@@ -106,7 +99,7 @@ def build_grid() -> List[Dict[str, Any]]:
         nodes        = {128: 256, 256: 512, 512: 1000}.get(shards, 100)
         miners       = nodes
         neighbors    = min(50, nodes - 1)
-        transactions = blocksize * 200
+        transactions = blocksize * 1000
         wallets      = transactions
 
         name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}_{sig}".replace(".", "p")
