@@ -471,6 +471,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
 
     diff, lam_shard = _mining_params(total_hash, S, target_bt, diff0)
     tx_cost_s = max(0.0, float(tx_cost_ms)) / 1000.0
+    per_shard_cap = (max(0, int(total_blocksize or 0)) + S - 1) // S
 
     bc = 0
     total_msg_cost = 0.0
@@ -479,7 +480,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
     has_tx = (tx_per_wallet or 0) > 0 and (wallets or 0) > 0
     total_needed = (wallets or 0) * (tx_per_wallet or 0) if has_tx else None
     pool_processed = 0
-    tot_cap = max(0, int(total_blocksize or 0))
+    verify_mode_used = verify_mode or "leader"
 
     while True:
         if blocks_limit is not None and bc >= blocks_limit:
@@ -488,43 +489,64 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
             break
 
         shard_times = [random.expovariate(lam_shard) for _ in range(S)]
-        dt_mine = max(shard_times)
         leader_idx = min(range(S), key=lambda i: shard_times[i])
+
+        # Shards that find a winner within the mining timeout
+        winning_times = [t for t in shard_times if t <= target_bt]
+        actual_winners = len(winning_times)
+
+        # Stop early if all shards won before timeout; otherwise wait the full timeout
+        if actual_winners == S:
+            dt_mine = max(shard_times)
+        else:
+            dt_mine = float(target_bt)
+
         yield env.timeout(dt_mine)
 
+        # Extremely unlikely: no shard won within timeout — skip this round
+        if actual_winners == 0:
+            continue
+
+        last_winner_time = max(winning_times)
+
+        # Transactions capped to winning shards only
         if has_tx:
             avail = pool_available()
-            take = min(avail, tot_cap)
+            take = min(avail, per_shard_cap * actual_winners)
             pool_processed += take
             pool_take(take)
         else:
             take = 0
 
         N = len(nodes)
+        # Only actual_winners shards report to leader
         dt_ann, msgs_ann = leader_announce_phase(N, msg_size)
-        dt_to_leader, msgs_to_leader = to_leader_phase(S, msg_size)
+        dt_to_leader, msgs_to_leader = to_leader_phase(actual_winners, msg_size)
         dt_control = dt_ann + dt_to_leader
         total_control_msgs += (msgs_ann + msgs_to_leader)
         total_msg_cost += (msgs_ann + msgs_to_leader) * float(msg_cost or 0.0)
 
         txs_next = (take + 1) if has_tx else 1
-        verify_mode_used = verify_mode or "leader"
 
         if verify_mode_used == "leader":
-            dt_verify_term = (txs_next - 1) * tx_cost_s if has_tx else 0.0
+            dt_verify_term = (take * tx_cost_s) if has_tx else 0.0
             verify_note = "verify_all@leader"
         elif verify_mode_used == "leader_par":
             threads = max(1, int(os.getenv("LEADER_VERIFY_THREADS", "8")))
-            dt_verify_term = ((txs_next - 1) * tx_cost_s / threads) if has_tx else 0.0
+            dt_verify_term = (take * tx_cost_s / threads) if has_tx else 0.0
             verify_note = f"verify_all@leader_par({threads}t)"
         elif verify_mode_used == "shard":
-            max_shard_tx = (txs_next - 1 + S - 1) // S if has_tx else 0
-            dt_verify_term = max_shard_tx * tx_cost_s
-            dt_attest = control_phase_delay(S, msg_size)
+            # Each winning shard verifies its own transactions starting when it won.
+            # Verification overlaps with remaining mining time for other shards.
+            # Only the remaining tail after dt_mine adds to round time.
+            actual_per_shard = (take + actual_winners - 1) // actual_winners if (has_tx and actual_winners > 0) else 0
+            dt_v = actual_per_shard * tx_cost_s
+            dt_verify_term = max(0.0, last_winner_time + dt_v - dt_mine)
+            dt_attest = control_phase_delay(actual_winners, msg_size)
             dt_control += dt_attest
-            total_control_msgs += S
-            total_msg_cost += S * float(msg_cost or 0.0)
-            verify_note = f"verify@shards + attest(S={S})"
+            total_control_msgs += actual_winners
+            total_msg_cost += actual_winners * float(msg_cost or 0.0)
+            verify_note = f"verify@shards+attest(W={actual_winners}/{S})"
         else:
             raise ValueError("--verify_mode must be one of: leader, shard, leader_par")
 
@@ -542,7 +564,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
         if (not quiet_blocks) and (dbg or (print_int and bc % print_int == 0)):
             net_note = "prop=flood"
             print(
-                f"[{env.now:.2f}] Block {bc} (leader shard={leader_idx}) "
+                f"[{env.now:.2f}] Block {bc} (leader={leader_idx}, winners={actual_winners}/{S}) "
                 f"tx={txs_next-1} dt={round_dt:.3f}s "
                 f"mine={dt_mine:.3f}s control={dt_control:.3f}s "
                 f"{verify_note}={dt_verify_term:.3f}s "
@@ -552,6 +574,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
             _print_summary(env.now, bc, blocks_limit, diff, total_hash,
                            total_msg_cost,
                            extra_fields=f"LeaderMode verify={verify_mode_used} "
+                                        f"Winners:{actual_winners}/{S} "
                                         f"CtrlMsgs:{total_control_msgs}")
 
     _print_final(env.now, bc, blocks_limit, diff, total_hash,
