@@ -148,7 +148,7 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--neighbors",       str(combo["neighbors"])]
     cmd += ["--transactions",    str(combo["transactions"])]
     cmd += ["--wallets",         str(combo["wallets"])]
-    cmd += ["--blocks",          "200"]
+    cmd += ["--blocks",          "1000"]
     cmd += ["--sig_scheme",      combo["sig_scheme"]]
 
     # Suppress per-block prints - too noisy for hundreds of runs
