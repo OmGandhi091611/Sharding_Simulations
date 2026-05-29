@@ -186,37 +186,33 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         return
 
     df["bs"]      = df[c_bs].astype(float).round().astype(int)
-    df["bt_cfg"]  = df[c_bt_cfg].astype(float).round().astype(int)
     df["abt"]     = df[c_abt].astype(float)
     df["tps_val"] = df[c_tps].astype(float)
 
+    # Y-axis bucketed to nearest 30-second interval
+    df["abt_key"] = ((df["abt"] / 30).round() * 30).astype(int)
+
     block_sizes = sorted(df["bs"].unique().tolist())
-    bt_cfgs     = sorted(df["bt_cfg"].unique().tolist())
+    abt_keys    = sorted(df["abt_key"].unique().tolist())
 
-    pivot     = df.pivot_table(index="bt_cfg", columns="bs", values="tps_val", aggfunc="mean")
-    pivot_abt = df.pivot_table(index="bt_cfg", columns="bs", values="abt",     aggfunc="mean")
-    pivot     = pivot.loc[bt_cfgs]
-    pivot_abt = pivot_abt.loc[bt_cfgs]
+    pivot_tps = df.pivot_table(index="abt_key", columns="bs", values="tps_val", aggfunc="mean")
+    pivot_abt = df.pivot_table(index="abt_key", columns="bs", values="abt",     aggfunc="mean")
+    pivot_tps = pivot_tps.reindex(index=abt_keys, columns=block_sizes)
+    pivot_abt = pivot_abt.reindex(index=abt_keys, columns=block_sizes)
 
-    # Mask cells where configured blocktime < minimum actual avg block time for that block size
-    min_abt_per_bs = df.groupby("bs")["abt"].min()
-    tps_masked = pivot.values.astype(float).copy()
-    for j, bs in enumerate(block_sizes):
-        for i, bt in enumerate(bt_cfgs):
-            if bt < min_abt_per_bs[bs]:
-                tps_masked[i, j] = np.nan
+    tps_vals = pivot_tps.values.astype(float)
+    masked   = np.ma.masked_invalid(tps_vals)
 
-    log_vals = np.log10(np.where(np.isnan(tps_masked), np.nan, tps_masked.clip(min=1e-9)))
-    masked   = np.ma.masked_invalid(log_vals)
-
-    n_y, n_x = len(bt_cfgs), len(block_sizes)
+    n_y, n_x = len(abt_keys), len(block_sizes)
     x_edges  = np.arange(n_x + 1) - 0.5
     y_edges  = np.arange(n_y + 1) - 0.5
 
-    cmap = plt.cm.RdYlGn.copy()
+    # Light cyan (0.25) → dark red (0.9): no white anywhere, dark at the high-TPS top
+    _turbo_colors = plt.cm.turbo(np.linspace(0.25, 0.9, 256))
+    cmap = plt.matplotlib.colors.LinearSegmentedColormap.from_list("turbo_clipped", _turbo_colors)
     cmap.set_bad("black")
 
-    fig, ax = plt.subplots(figsize=(14, 10))
+    fig, ax = plt.subplots(figsize=(14, max(10, n_y * 0.9)))
     ax.set_facecolor("black")
 
     im = ax.pcolormesh(x_edges, y_edges, masked, cmap=cmap, shading="flat")
@@ -227,39 +223,24 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     ax.set_xticks(range(n_x))
     ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=16)
     ax.set_yticks(range(n_y))
-    ax.set_yticklabels([f"{bt}s" for bt in bt_cfgs], fontsize=16)
+    ax.set_yticklabels([f"{k}s" for k in abt_keys], fontsize=16)
 
-    norm = plt.matplotlib.colors.Normalize(vmin=np.nanmin(log_vals), vmax=np.nanmax(log_vals))
     for i in range(n_y):
         for j in range(n_x):
-            tps_val = tps_masked[i, j]
+            tps_val = tps_vals[i, j]
             if np.isnan(tps_val):
-                raw_tps = pivot.values[i, j]
-                raw_abt = pivot_abt.values[i, j]
-                if not np.isnan(raw_tps):
-                    tps_str = f"{raw_tps:.0f}" if raw_tps < 1000 else f"{raw_tps/1000:.1f}k"
-                    ax.text(j, i, f"{tps_str} TPS\n{raw_abt:.0f}s", ha="center", va="center",
-                            fontsize=12, color="white", linespacing=1.4)
                 continue
-            abt_val    = pivot_abt.values[i, j]
-            brightness = norm(log_vals[i, j])
-            txt_color  = "white" if brightness < 0.45 else "black"
-            tps_str    = f"{tps_val:.0f}" if tps_val < 1000 else f"{tps_val/1000:.1f}k"
-            ax.text(j, i, f"{tps_str} TPS\n{abt_val:.0f}s", ha="center", va="center",
-                    fontsize=12, color=txt_color, linespacing=1.4)
+            tps_str = f"{tps_val:.0f}" if tps_val < 1000 else f"{tps_val/1000:.1f}k"
+            ax.text(j, i, tps_str, ha="center", va="center",
+                    fontsize=12, color="white", fontweight="bold")
 
     ax.set_xlabel("Block Size (tx/block)", fontsize=17)
-    ax.set_ylabel("Configured Block Time (s)", fontsize=17)
+    ax.set_ylabel("Actual Average Block Time (s)", fontsize=17)
     ax.set_title("TPS Heatmap — BTC Hypothetical (Non-Sharded)", fontsize=18)
 
-    cbar = plt.colorbar(im, ax=ax, label="TPS")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.ax.tick_params(labelsize=13)
     cbar.set_label("TPS", fontsize=17)
-    cbar.ax.tick_params(labelsize=15)
-    log_min = int(np.floor(np.nanmin(log_vals)))
-    log_max = int(np.ceil(np.nanmax(log_vals)))
-    ticks   = list(range(log_min, log_max + 1))
-    cbar.set_ticks(ticks)
-    cbar.set_ticklabels([f"$10^{{{t}}}$" for t in ticks])
 
     savefig(outdir, "heatmap_tps_blocktime_vs_blocksize_btc_hypothetical.png")
     if show:
@@ -285,6 +266,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
     c_shards = _pick_col(df, ["shards"])
     c_bs = _pick_col(df, ["block size", "block_size", "blocksize"])
     c_tps = _pick_col(df, ["tps"])
+    c_abt = _pick_col(df, ["average block time", "avg block time", "avg_block_time"])
     c_bt_cfg = _pick_col(df, [
         "blocktime in configuration file",
         "configured blocktime",
@@ -310,6 +292,8 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
     for c in [c_shards, c_bs, c_tps, c_bt_cfg]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    if c_abt:
+        df[c_abt] = pd.to_numeric(df[c_abt], errors="coerce")
 
     df = df.dropna(subset=[c_shards, c_bs, c_tps, c_bt_cfg]).copy()
     if df.empty:
@@ -320,6 +304,23 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
     df["block_size_int"] = df[c_bs].astype(int)
     df["blocktime_cfg"] = df[c_bt_cfg].astype(float).round(6)
     df["tps_val"] = df[c_tps].astype(float)
+    df["abt_val"] = df[c_abt].astype(float) if c_abt else df["blocktime_cfg"]
+
+    # Actual block time at max shard count per (block_size, configured_blocktime) — used as line label
+    abt_at_max_shards = (
+        df.sort_values("shards_int")
+        .groupby(["block_size_int", "blocktime_cfg"])["abt_val"]
+        .last()
+        .to_dict()
+    )
+
+    def _fmt_bt(t):
+        if t < 1:
+            return f"{t:.2f}s"
+        elif t < 10:
+            return f"{t:.1f}s"
+        else:
+            return f"{t:.0f}s"
 
     dup_count = df.duplicated(subset=["block_size_int", "blocktime_cfg", "shards_int"]).sum()
     if dup_count > 0:
@@ -369,7 +370,8 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                 ax.axis("off")
                 continue
 
-            for bt in all_blocktimes:
+            _half = len(all_blocktimes) // 2
+            for _idx, bt in enumerate(all_blocktimes):
                 line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
                 if line_df.empty:
                     continue
@@ -381,7 +383,8 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     marker="o",
                     linewidth=1.8,
                     markersize=4,
-                    label=f"BT={bt:g}s"
+                    linestyle=":" if _idx < _half else "-",
+                    label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt))
                 )
 
             ax.set_title(f"Block Size = {bs:,}")
@@ -442,7 +445,8 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                 ax.axis("off")
                 continue
 
-            for bt in all_blocktimes:
+            _half = len(all_blocktimes) // 2
+            for _idx, bt in enumerate(all_blocktimes):
                 line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
                 if line_df.empty:
                     continue
@@ -454,7 +458,8 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     marker="o",
                     linewidth=1.5,
                     markersize=3.5,
-                    label=f"BT={bt:g}s"
+                    linestyle=":" if _idx < _half else "-",
+                    label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt))
                 )
 
             ax.set_title(f"BS={bs}")
@@ -530,10 +535,30 @@ def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
         print("[skip] memo CSV has no usable rows for messages plot")
         return
 
+    c_abt = _pick_col(df, ["average block time", "avg block time", "avg_block_time"])
+    if c_abt:
+        df[c_abt] = pd.to_numeric(df[c_abt], errors="coerce")
+
     df["shards_int"]     = df[c_shards].astype(int)
     df["block_size_int"] = df[c_bs].astype(int)
     df["blocktime_cfg"]  = df[c_bt_cfg].astype(float).round(6)
     df["messages_val"]   = df[c_msgs].astype(float)
+    df["abt_val"]        = df[c_abt].astype(float) if c_abt else df["blocktime_cfg"]
+
+    abt_at_max_shards = (
+        df.sort_values("shards_int")
+        .groupby(["block_size_int", "blocktime_cfg"])["abt_val"]
+        .last()
+        .to_dict()
+    )
+
+    def _fmt_bt(t):
+        if t < 1:
+            return f"{t:.2f}s"
+        elif t < 10:
+            return f"{t:.1f}s"
+        else:
+            return f"{t:.0f}s"
 
     plot_df = (
         df[["block_size_int", "blocktime_cfg", "shards_int", "messages_val"]]
@@ -571,14 +596,16 @@ def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
                 ax.axis("off")
                 continue
 
-            for bt in all_blocktimes:
+            _half = len(all_blocktimes) // 2
+            for _idx, bt in enumerate(all_blocktimes):
                 line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
                 if line_df.empty:
                     continue
                 x_vals = [x_positions[s] for s in line_df["shards_int"]]
                 ax.plot(x_vals, line_df["messages_val"],
                         marker="o", linewidth=1.8, markersize=4,
-                        label=f"BT={bt:g}s")
+                        linestyle=":" if _idx < _half else "-",
+                        label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt)))
 
             ax.set_title(f"Block Size = {bs:,}")
             ax.set_xlabel("Number of Shards")

@@ -292,6 +292,52 @@ def _python_fallback_merge(csvs, final_csv):
 
 
 # ------------------------------------------------------------------ #
+# Skip-completed filter
+# ------------------------------------------------------------------ #
+
+def load_merged_tps_keys(results_dir: str, sig_schemes: List[str]) -> set:
+    """Read final merged CSVs once → set of (tps, avg_block_time) strings already merged."""
+    import csv
+    merged = set()
+    for scheme in sig_schemes:
+        final_csv = os.path.join(results_dir, f"memo_results_{scheme}.csv")
+        if not os.path.exists(final_csv):
+            continue
+        try:
+            with open(final_csv, newline="") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        merged.add((row["tps"].strip(), row["average block time"].strip()))
+                    except KeyError:
+                        continue
+            print(f"[skip-check] {len(merged)} rows loaded from {os.path.basename(final_csv)}")
+        except Exception as e:
+            print(f"[skip-check] Could not read {final_csv}: {e}")
+    return merged
+
+
+def needs_run(combo: dict, runs_dir: str, merged_keys: set) -> bool:
+    """A combo needs to run if:
+    - its per-run CSV doesn't exist (never ran), OR
+    - its per-run CSV TPS/avg_block_time matches the merged CSV
+      (stale data from a previous batch, not from the current missing-tests run)."""
+    import csv
+    per_run_csv = os.path.join(runs_dir, f"{combo['name']}.csv")
+    if not os.path.exists(per_run_csv):
+        return True
+    try:
+        with open(per_run_csv, newline="") as f:
+            for row in csv.DictReader(f):
+                key = (row["tps"].strip(), row["average block time"].strip())
+                if key in merged_keys:
+                    return True  # stale — same as what's already merged
+                return False     # fresh result not yet in merged CSV, skip
+    except Exception:
+        pass
+    return True  # unreadable per-run CSV, re-run to be safe
+
+
+# ------------------------------------------------------------------ #
 # Main
 # ------------------------------------------------------------------ #
 
@@ -302,6 +348,12 @@ def main():
 
     combos = build_grid()
     total  = len(combos)
+
+    merged_keys = load_merged_tps_keys(RESULTS_DIR, SIG_SCHEMES)
+    if merged_keys:
+        combos = [c for c in combos if needs_run(c, RUNS_DIR, merged_keys)]
+        skipped = total - len(combos)
+        print(f"[skip-check] {skipped} fresh/already-merged runs skipped, {len(combos)} remaining\n")
 
     print(f"Parallel grid runner")
     print(f"  Shards      : {SHARD_COUNTS}")
