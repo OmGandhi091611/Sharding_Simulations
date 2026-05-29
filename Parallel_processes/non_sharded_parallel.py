@@ -37,8 +37,6 @@ MERGE_BIN   = str(ROOT / "merge_results")
 # GRID — edit these lists to define your parameter space
 # ------------------------------------------------------------------ #
 BLOCK_SIZES = [
-    1024,
-    2048,
     4096,
     8192,
     16384,
@@ -50,20 +48,26 @@ BLOCK_SIZES = [
 ]
 
 BLOCK_TIMES = [
-    1200,
     600,
+    540,
+    510,
+    480,
+    450,
+    420,
+    390,
+    360,
+    330,
     300,
+    270,
+    240,
+    210,
+    180,
     150,
-    75,
-    37.5,
-    18.75,
-    9.375,
-    4.6875,
-    2.34375,
-    1.171875,
-    0.5859375,
-    0.29296875,
-    0.146484375,
+    120,
+    90,
+    60,
+    30,
+    1
 ]
 
 # ------------------------------------------------------------------ #
@@ -85,10 +89,16 @@ def build_grid() -> List[Dict[str, Any]]:
     combos = []
     for blocksize, blocktime in itertools.product(BLOCK_SIZES, BLOCK_TIMES):
         name = f"ns_bs{blocksize}_bt{blocktime:.5f}".replace(".", "p")
+        # Ensure the tx pool never runs dry before 1000 blocks complete.
+        # Pool is a counter (no memory cost), so scaling high is free.
+        transactions = blocksize * 200
+        wallets      = transactions
         combos.append({
             "name":            name,
             "total_blocksize": blocksize,
             "blocktime":       blocktime,
+            "transactions":    transactions,
+            "wallets":         wallets,
         })
     return combos
 
@@ -116,10 +126,9 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     # Varying params as CLI args (win over base JSON)
     cmd += ["--total-blocksize", str(combo["total_blocksize"])]
     cmd += ["--blocktime",       str(combo["blocktime"])]
+    cmd += ["--transactions",    str(combo["transactions"])]
+    cmd += ["--wallets",         str(combo["wallets"])]
     cmd += ["--blocks",          "1000"]
-
-    # Suppress per-block prints - too noisy for hundreds of runs
-    cmd += ["--quiet_blocks"]
 
     return subprocess.Popen(
         cmd,
@@ -213,6 +222,26 @@ class WorkerPool:
 # Merge
 # ------------------------------------------------------------------ #
 
+def _drop_column(csv_path: str, column: str):
+    """Remove a column from an existing CSV in-place."""
+    import csv
+    try:
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None or column not in reader.fieldnames:
+                return
+            fieldnames = [c for c in reader.fieldnames if c != column]
+            rows = list(reader)
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+        print(f"[merge] Dropped '{column}' column from {os.path.basename(csv_path)}")
+    except Exception as e:
+        print(f"[merge] Could not drop '{column}': {e}")
+
+
 def merge_run_csvs(runs_dir: str):
     final_csv = os.path.join(RESULTS_DIR, "non_sharded_results.csv")
     csvs = sorted(Path(runs_dir).glob("ns_*.csv"))
@@ -229,6 +258,7 @@ def merge_run_csvs(runs_dir: str):
         print(f"[merge] Merging {len(csvs)} files -> {final_csv}")
         subprocess.run(cmd)
 
+    _drop_column(final_csv, "sig_scheme")
     print(f"[merge] Done -> {final_csv}")
 
 
