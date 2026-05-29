@@ -109,7 +109,7 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 
     plt.figure(figsize=(7, 4))
     plt.bar(x - width / 2, comparison["sim_tps"].tolist(), width, label="Simulated TPS")
-    plt.bar(x + width / 2, comparison["real_tps"].tolist(), width, label="Real-world TPS")
+    plt.bar(x + width / 2, comparison["real_tps"].tolist(), width, label="Claimed TPS")
     plt.xticks(x, labels)
     plt.ylabel("Transactions per second")
     plt.title("TPS: Simulator vs Real-world")
@@ -123,7 +123,7 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 
     plt.figure(figsize=(7, 4))
     plt.bar(x - width / 2, comparison["sim_avg_block_time"].tolist(), width, label="Simulated Avg Block Time")
-    plt.bar(x + width / 2, comparison["real_avg_block_time"].tolist(), width, label="Real-world Avg Block Time")
+    plt.bar(x + width / 2, comparison["real_avg_block_time"].tolist(), width, label="Claimed Block Time")
     plt.xticks(x, labels)
     plt.ylabel("Average block time (seconds)")
     plt.title("Block Time: Simulator vs Real-world")
@@ -189,8 +189,8 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     df["abt"]     = df[c_abt].astype(float)
     df["tps_val"] = df[c_tps].astype(float)
 
-    # Y-axis bucketed to nearest 30-second interval
-    df["abt_key"] = ((df["abt"] / 30).round() * 30).astype(int)
+    # Y-axis binned into 30-second ranges: 1-30s, 30-60s, 60-90s, ...
+    df["abt_key"] = (df["abt"] // 30).astype(int) * 30
 
     block_sizes = sorted(df["bs"].unique().tolist())
     abt_keys    = sorted(df["abt_key"].unique().tolist())
@@ -200,22 +200,32 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     pivot_tps = pivot_tps.reindex(index=abt_keys, columns=block_sizes)
     pivot_abt = pivot_abt.reindex(index=abt_keys, columns=block_sizes)
 
-    tps_vals = pivot_tps.values.astype(float)
-    masked   = np.ma.masked_invalid(tps_vals)
+    tps_vals  = pivot_tps.values.astype(float)
+    was_nan   = np.isnan(tps_vals)
+    # Fill missing cells by averaging adjacent columns, then rows for any remaining gaps
+    tps_filled = pd.DataFrame(tps_vals).interpolate(axis=1, method="linear", limit_direction="both").values
+    tps_filled = pd.DataFrame(tps_filled).interpolate(axis=0, method="linear", limit_direction="both").values
+    masked     = np.ma.masked_invalid(tps_filled)
 
     n_y, n_x = len(abt_keys), len(block_sizes)
     x_edges  = np.arange(n_x + 1) - 0.5
     y_edges  = np.arange(n_y + 1) - 0.5
 
-    # Light cyan (0.25) → dark red (0.9): no white anywhere, dark at the high-TPS top
-    _turbo_colors = plt.cm.turbo(np.linspace(0.25, 0.9, 256))
-    cmap = plt.matplotlib.colors.LinearSegmentedColormap.from_list("turbo_clipped", _turbo_colors)
-    cmap.set_bad("black")
+    # Red (low TPS) → orange → yellow → deep sky blue (high TPS): highest is the goal
+    # All colors kept dark/saturated enough for white text to remain readable
+    cmap = plt.matplotlib.colors.LinearSegmentedColormap.from_list(
+        "red_to_skyblue", ["#990000", "#cc4400", "#cc9900", "#0077bb"]
+    )
+    cmap.set_bad("#333333")
 
-    fig, ax = plt.subplots(figsize=(14, max(10, n_y * 0.9)))
-    ax.set_facecolor("black")
+    vmin = float(np.nanmin(tps_filled))
+    vmax = float(np.nanmax(tps_filled))
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
 
-    im = ax.pcolormesh(x_edges, y_edges, masked, cmap=cmap, shading="flat")
+    _, ax = plt.subplots(figsize=(14, max(10, n_y * 0.9)))
+    ax.set_facecolor("#333333")
+
+    im = ax.pcolormesh(x_edges, y_edges, masked, cmap=cmap, norm=norm, shading="flat")
 
     ax.set_xlim(x_edges[0], x_edges[-1])
     ax.set_ylim(y_edges[0], y_edges[-1])
@@ -223,16 +233,26 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     ax.set_xticks(range(n_x))
     ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=16)
     ax.set_yticks(range(n_y))
-    ax.set_yticklabels([f"{k}s" for k in abt_keys], fontsize=16)
+    ax.set_yticklabels([f"{k+30}s" for k in abt_keys], fontsize=16)
 
     for i in range(n_y):
         for j in range(n_x):
-            tps_val = tps_vals[i, j]
+            tps_val = tps_filled[i, j]
             if np.isnan(tps_val):
                 continue
             tps_str = f"{tps_val:.0f}" if tps_val < 1000 else f"{tps_val/1000:.1f}k"
+            # Pick white or black text based on background luminance (ITU-R BT.709)
+            r, g, b, _ = cmap(norm(tps_val))
+            lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            base_color = "black" if lum > 0.45 else "white"
+            # Interpolated cells: same contrast rule but slightly muted
+            if was_nan[i, j]:
+                color = "#444444" if lum > 0.45 else "#cccccc"
+            else:
+                color = base_color
+            style = "italic" if was_nan[i, j] else "normal"
             ax.text(j, i, tps_str, ha="center", va="center",
-                    fontsize=12, color="white", fontweight="bold")
+                    fontsize=12, color=color, fontweight="bold", fontstyle=style)
 
     ax.set_xlabel("Block Size (tx/block)", fontsize=17)
     ax.set_ylabel("Actual Average Block Time (s)", fontsize=17)
@@ -499,7 +519,80 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 
 
 # ----------------------------
-# 4b) New sharded design Messages vs Shards -> memo_msg_graphs/
+# 4b) New sharded design Block Time vs Shards -> memo_graphs_<condition>/
+#     One line per block size: minimum actual block time per (block size, shard count)
+# ----------------------------
+def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool):
+    if not os.path.exists(memo_csv):
+        print(f"[skip] memo CSV not found: {memo_csv}")
+        return
+
+    df = pd.read_csv(memo_csv, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    c_shards = _pick_col(df, ["shards"])
+    c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
+    c_abt    = _pick_col(df, ["average block time", "avg block time", "avg_block_time"])
+
+    missing = [n for n, c in [("shards", c_shards), ("block size", c_bs),
+                               ("average block time", c_abt)] if c is None]
+    if missing:
+        print(f"[skip] memo CSV missing required columns for blocktime plot: {missing}")
+        return
+
+    for c in [c_shards, c_bs, c_abt]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=[c_shards, c_bs, c_abt]).copy()
+    if df.empty:
+        print("[skip] memo CSV has no usable rows for blocktime vs shards plot")
+        return
+
+    df["shards_int"]     = df[c_shards].astype(int)
+    df["block_size_int"] = df[c_bs].astype(int)
+    df["abt_val"]        = df[c_abt].astype(float)
+
+    # Minimum actual block time per (block size, shard count)
+    agg = (
+        df.groupby(["block_size_int", "shards_int"])["abt_val"]
+        .min()
+        .reset_index()
+        .sort_values(["block_size_int", "shards_int"])
+    )
+
+    block_sizes = sorted(agg["block_size_int"].unique().tolist())
+    all_shards  = sorted(agg["shards_int"].unique().tolist())
+
+    x_positions = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks      = [x_positions[s] for s in all_shards]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for bs in block_sizes:
+        sub = agg[agg["block_size_int"] == bs].sort_values("shards_int")
+        x_vals = [x_positions[s] for s in sub["shards_int"]]
+        ax.plot(x_vals, sub["abt_val"], marker="o", linewidth=1.8,
+                markersize=4, label=f"{bs:,}")
+
+    ax.set_xlabel("Number of Shards", fontsize=13)
+    ax.set_ylabel("Min Actual Block Time (s)", fontsize=13)
+    ax.set_title("New Sharded Design: Min Block Time vs Number of Shards", fontsize=14)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.set_yscale("log")
+    ax.legend(title="Block Size", fontsize=8, title_fontsize=9,
+              loc="upper right", ncol=2)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, "memo_blocktime_vs_shards.png")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ----------------------------
+# 4c) New sharded design Messages vs Shards -> memo_msg_graphs/
 # ----------------------------
 def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
     if not os.path.exists(memo_csv):
@@ -723,6 +816,7 @@ def main():
     ap.add_argument("--near_out", default="near_graphs", help="Output folder for NEAR graphs")
     ap.add_argument("--memo_out", default="memo_graphs", help="Output folder for new sharded design graphs")
     ap.add_argument("--memo_msg_out", default="memo_msg_graphs", help="Output folder for new sharded design messages vs shards graphs")
+    ap.add_argument("--memo_bt_out", default="memo_graphs", help="Output folder for block time vs shards graphs")
     ap.add_argument("--non_out", default="non_sharded_graphs", help="Output folder for non-sharded graphs")
     ap.add_argument("--val_out", default="Validations", help="Output folder for validation graphs")
 
@@ -734,6 +828,7 @@ def main():
     ap.add_argument("--skip_near", action="store_true")
     ap.add_argument("--skip_memo", action="store_true")
     ap.add_argument("--skip_memo_msg", action="store_true")
+    ap.add_argument("--skip_memo_bt", action="store_true")
     ap.add_argument("--skip_non", action="store_true")
     ap.add_argument("--skip_validation", action="store_true")
     ap.add_argument("--skip_sig_schemes", action="store_true",
@@ -747,12 +842,6 @@ def main():
     non_csv  = os.path.join(args.results_dir, args.non_csv)
     val_csv  = os.path.join(args.results_dir, args.validation_csv)
 
-    safe_mkdir(args.near_out)
-    safe_mkdir(args.memo_out)
-    safe_mkdir(args.memo_msg_out)
-    safe_mkdir(args.non_out)
-    safe_mkdir(args.val_out)
-
     if not args.skip_near:
         run_near_vs_targets(near_csv, args.near_out, show=show)
 
@@ -761,6 +850,9 @@ def main():
 
     if not args.skip_memo_msg:
         run_memo_messages_vs_shards(memo_csv, args.memo_msg_out, show=show)
+
+    if not args.skip_memo_bt:
+        run_memo_blocktime_vs_shards(memo_csv, args.memo_bt_out, show=show)
 
     if not args.skip_non:
         run_bubble_nonsharded_vs_memo_s1(non_csv, memo_csv, args.non_out, show=show)
