@@ -2,7 +2,7 @@
 
 **A Python-based discrete-event simulation framework for evaluating non-sharded, NEAR-protocol-style, and MEMO-style sharded blockchain architectures under configurable network and workload conditions.**
 
-> Om Gandhi — Illinois Institute of Technology
+> Om Amit Gandhi — Illinois Institute of Technology
 > Under review: IEEE/ACM MASCOTS 2026
 
 ---
@@ -681,7 +681,7 @@ python graph.py --skip_near --skip_memo --skip_non --no_show
 If you use this simulator in a report or publication, please cite:
 
 ```
-Om Gandhi, "Sharding Simulations," GitHub repository, 2025.
+Om Amit Gandhi, "Sharding Simulations," GitHub repository, 2025.
 ```
 
 ---
