@@ -5,6 +5,8 @@
 > Om Amit Gandhi — Illinois Institute of Technology
 > Under review: IEEE/ACM MASCOTS 2026
 
+If you find this useful, please consider giving it a star ⭐ — it helps others find the work.
+
 ---
 
 ## Abstract
