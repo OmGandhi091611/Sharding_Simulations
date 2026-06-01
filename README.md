@@ -309,12 +309,11 @@ Repeat for `dilithium2`, `falcon512`, and `sphincs_sha2_128s`.
 | `memo_tps_vs_shards_part2.png` | 2×3 grid — remaining block sizes |
 | `memo_tps_vs_shards_all_blocksizes.png` | Full grid, log scale |
 
-**Messages vs shards** — stored in `memo_msg_graphs/` (or `memo_graphs_<condition>/`):
+**Messages vs shards** — stored in `memo_graphs_<condition>/`:
 
 | File | Description |
 |---|---|
-| `memo_messages_vs_shards_part1.png` | 2×2 grid — coordination messages per block vs shard count |
-| `memo_messages_vs_shards_part2.png` | 2×3 grid — remaining block sizes |
+| `memo_messages_vs_shards.png` | Single graph — coordination messages vs shard count; one colored line per block size. If all block sizes produce essentially the same message counts (relative std < 0.1%), collapses automatically to a single representative line. |
 
 **Per-signature-scheme graphs** — same structure, stored in `memo_graphs_<scheme>/`:
 
@@ -328,9 +327,25 @@ memo_graphs_sphincs_sha2_128s/
 Generate MEMO graphs for all three network conditions:
 
 ```bash
-python graph.py --memo_csv memo_results_local.csv  --memo_out memo_graphs_local  --memo_msg_out memo_graphs_local  --skip_near --skip_non --skip_validation --no_show
-python graph.py --memo_csv memo_results_usa.csv    --memo_out memo_graphs_usa    --memo_msg_out memo_graphs_usa    --skip_near --skip_non --skip_validation --no_show
-python graph.py --memo_csv memo_results_global.csv --memo_out memo_graphs_global --memo_msg_out memo_graphs_global --skip_near --skip_non --skip_validation --no_show
+python graph.py --results_dir Results --memo_csv memo_results_local.csv  --memo_out memo_graphs_local  --memo_msg_out memo_graphs_local  --skip_near --skip_non --skip_validation --no_show
+python graph.py --results_dir Results --memo_csv memo_results_usa.csv    --memo_out memo_graphs_usa    --memo_msg_out memo_graphs_usa    --skip_near --skip_non --skip_validation --no_show
+python graph.py --results_dir Results --memo_csv memo_results_global.csv --memo_out memo_graphs_global --memo_msg_out memo_graphs_global --skip_near --skip_non --skip_validation --no_show
+```
+
+Generate only the messages-vs-shards graph for all three conditions:
+
+```bash
+python graph.py --no_show --skip_near --skip_memo --skip_memo_bt --skip_non --skip_validation --skip_sig_schemes --memo_csv memo_results_local.csv  --memo_msg_out memo_graphs_local
+python graph.py --no_show --skip_near --skip_memo --skip_memo_bt --skip_non --skip_validation --skip_sig_schemes --memo_csv memo_results_usa.csv    --memo_msg_out memo_graphs_usa
+python graph.py --no_show --skip_near --skip_memo --skip_memo_bt --skip_non --skip_validation --skip_sig_schemes --memo_csv memo_results_global.csv --memo_msg_out memo_graphs_global
+```
+
+Generate the blocktime-vs-shards graph filtered to a specific block size:
+
+```bash
+python graph.py --no_show --skip_near --skip_memo --skip_memo_msg --skip_non --skip_validation --skip_sig_schemes \
+  --memo_csv memo_results_global.csv --memo_bt_out memo_graphs_global --memo_bt_blocksize 4096
+# Output: memo_graphs_global/memo_blocktime_vs_shards_bs4096.png
 ```
 
 Generate per-signature-scheme graphs (requires `memo_results_<scheme>.csv` in `Results/`):
@@ -546,6 +561,7 @@ python graph.py --no_show --skip_memo --skip_memo_msg --skip_non --skip_validati
 | `--near_out` | `near_graphs` | Output folder for NEAR figures |
 | `--memo_out` | `memo_graphs` | Output folder for MEMO TPS figures |
 | `--memo_msg_out` | `memo_msg_graphs` | Output folder for MEMO messages-vs-shards figures |
+| `--memo_bt_out` | `memo_graphs` | Output folder for MEMO blocktime-vs-shards figures |
 | `--non_out` | `non_sharded_graphs` | Output folder for non-sharded figures |
 | `--val_out` | `Validations` | Output folder for validation figures |
 
@@ -557,9 +573,11 @@ python graph.py --no_show --skip_memo --skip_memo_msg --skip_non --skip_validati
 | `--skip_near` | Skip NEAR plot generation |
 | `--skip_memo` | Skip MEMO TPS plot generation |
 | `--skip_memo_msg` | Skip MEMO messages-vs-shards plot generation |
+| `--skip_memo_bt` | Skip MEMO blocktime-vs-shards plot generation |
 | `--skip_non` | Skip non-sharded plot generation |
 | `--skip_validation` | Skip validation plot generation |
 | `--skip_sig_schemes` | Skip per-signature-scheme plot generation |
+| `--memo_bt_blocksize` | If set, filter the blocktime-vs-shards graph to this single block size (e.g. `--memo_bt_blocksize 4096`). Output filename becomes `memo_blocktime_vs_shards_bs<N>.png`. |
 
 ---
 
@@ -580,15 +598,16 @@ Missing cells are filled by linear interpolation across adjacent columns (then r
 | `near_tps_comparison.png` | Simulated TPS vs target TPS for 4, 6, and 9 shards (side-by-side bars) |
 | `near_blocktime_comparison.png` | Simulated vs target average block time per shard count |
 
-### MEMO-Style Sharded — `memo_graphs_<condition>/` and `memo_msg_graphs/`
+### MEMO-Style Sharded — `memo_graphs_<condition>/`
 
 | File | Description |
 |---|---|
 | `memo_tps_vs_shards_part1.png` | 2×2 facet grid — TPS vs shards for 4 largest block sizes; one line per configured block time |
 | `memo_tps_vs_shards_part2.png` | 2×3 facet grid — remaining block sizes |
 | `memo_tps_vs_shards_all_blocksizes.png` | Full grid at log scale |
-| `memo_messages_vs_shards_part1.png` | 2×2 grid — coordination messages per block vs shard count |
-| `memo_messages_vs_shards_part2.png` | 2×3 grid — remaining block sizes |
+| `memo_messages_vs_shards.png` | Single graph — messages vs shards; one colored line per block size. Auto-collapses to one line if all block sizes are identical (< 0.1% relative variation). |
+| `memo_blocktime_vs_shards.png` | Single graph — minimum actual block time vs shards; one colored line per block size (log scale) |
+| `memo_blocktime_vs_shards_bs<N>.png` | Same as above, filtered to block size N (produced when `--memo_bt_blocksize` is set) |
 
 The same set is generated for each signature scheme under `memo_graphs_<scheme>/`.
 
