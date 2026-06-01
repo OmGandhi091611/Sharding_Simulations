@@ -522,7 +522,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
 # 4b) New sharded design Block Time vs Shards -> memo_graphs_<condition>/
 #     One line per block size: minimum actual block time per (block size, shard count)
 # ----------------------------
-def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool):
+def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool, block_size: int = None):
     if not os.path.exists(memo_csv):
         print(f"[skip] memo CSV not found: {memo_csv}")
         return
@@ -559,6 +559,14 @@ def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool):
         .sort_values(["block_size_int", "shards_int"])
     )
 
+    if block_size is not None:
+        if block_size not in agg["block_size_int"].values:
+            available = sorted(agg["block_size_int"].unique().tolist())
+            print(f"[skip] block size {block_size} not found in data. Available: {available}")
+            return
+        agg = agg[agg["block_size_int"] == block_size].copy()
+        print(f"[info] Filtering blocktime vs shards to block size = {block_size}")
+
     block_sizes = sorted(agg["block_size_int"].unique().tolist())
     all_shards  = sorted(agg["shards_int"].unique().tolist())
 
@@ -573,9 +581,12 @@ def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool):
         ax.plot(x_vals, sub["abt_val"], marker="o", linewidth=1.8,
                 markersize=4, label=f"{bs:,}")
 
+    title_suffix = f" (Block Size = {block_size:,})" if block_size is not None else ""
+    out_name = f"memo_blocktime_vs_shards_bs{block_size}.png" if block_size is not None else "memo_blocktime_vs_shards.png"
+
     ax.set_xlabel("Number of Shards", fontsize=13)
     ax.set_ylabel("Min Actual Block Time (s)", fontsize=13)
-    ax.set_title("New Sharded Design: Min Block Time vs Number of Shards", fontsize=14)
+    ax.set_title(f"New Sharded Design: Min Block Time vs Number of Shards{title_suffix}", fontsize=14)
     ax.set_xticks(xticks)
     ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
     ax.set_yscale("log")
@@ -584,7 +595,7 @@ def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool):
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
 
-    savefig(outdir, "memo_blocktime_vs_shards.png")
+    savefig(outdir, out_name)
     if show:
         plt.show()
     else:
@@ -593,6 +604,9 @@ def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool):
 
 # ----------------------------
 # 4c) New sharded design Messages vs Shards -> memo_msg_graphs/
+#     Single graph, one colored line per block size (averaged across block times).
+#     Messages are nearly identical across block sizes/times, so lines nearly overlap.
+#     If all lines visually collapse to one, a single representative line suffices.
 # ----------------------------
 def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
     if not os.path.exists(memo_csv):
@@ -605,135 +619,86 @@ def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
     c_shards = _pick_col(df, ["shards"])
     c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
     c_msgs   = _pick_col(df, ["messages"])
-    c_bt_cfg = _pick_col(df, [
-        "blocktime in configuration file",
-        "configured blocktime",
-        "config blocktime",
-        "blocktime",
-        "block time",
-    ])
 
-    missing = [n for n, c in [("shards", c_shards), ("block size", c_bs),
-                               ("messages", c_msgs), ("blocktime in configuration file", c_bt_cfg)]
+    missing = [n for n, c in [("shards", c_shards), ("block size", c_bs), ("messages", c_msgs)]
                if c is None]
     if missing:
         print(f"[skip] memo CSV missing required columns for messages plot: {missing}")
         return
 
-    for c in [c_shards, c_bs, c_msgs, c_bt_cfg]:
+    for c in [c_shards, c_bs, c_msgs]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df = df.dropna(subset=[c_shards, c_bs, c_msgs, c_bt_cfg]).copy()
+    df = df.dropna(subset=[c_shards, c_bs, c_msgs]).copy()
     if df.empty:
         print("[skip] memo CSV has no usable rows for messages plot")
         return
 
-    c_abt = _pick_col(df, ["average block time", "avg block time", "avg_block_time"])
-    if c_abt:
-        df[c_abt] = pd.to_numeric(df[c_abt], errors="coerce")
-
     df["shards_int"]     = df[c_shards].astype(int)
     df["block_size_int"] = df[c_bs].astype(int)
-    df["blocktime_cfg"]  = df[c_bt_cfg].astype(float).round(6)
     df["messages_val"]   = df[c_msgs].astype(float)
-    df["abt_val"]        = df[c_abt].astype(float) if c_abt else df["blocktime_cfg"]
 
-    abt_at_max_shards = (
-        df.sort_values("shards_int")
-        .groupby(["block_size_int", "blocktime_cfg"])["abt_val"]
-        .last()
-        .to_dict()
+    # Average messages across all block times for each (block_size, shard) combo
+    agg = (
+        df.groupby(["block_size_int", "shards_int"])["messages_val"]
+        .mean()
+        .reset_index()
+        .sort_values(["block_size_int", "shards_int"])
     )
 
-    def _fmt_bt(t):
-        if t < 1:
-            return f"{t:.2f}s"
-        elif t < 10:
-            return f"{t:.1f}s"
-        else:
-            return f"{t:.0f}s"
+    block_sizes = sorted(agg["block_size_int"].unique().tolist(), reverse=True)
+    all_shards  = sorted(agg["shards_int"].unique().tolist())
 
-    plot_df = (
-        df[["block_size_int", "blocktime_cfg", "shards_int", "messages_val"]]
-        .drop_duplicates(subset=["block_size_int", "blocktime_cfg", "shards_int"], keep="first")
-        .sort_values(["block_size_int", "blocktime_cfg", "shards_int"])
-    )
+    x_positions = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks      = [x_positions[s] for s in all_shards]
 
-    block_sizes    = sorted(plot_df["block_size_int"].unique().tolist(), reverse=True)
-    all_blocktimes = sorted(plot_df["blocktime_cfg"].unique().tolist())
-    all_shards     = sorted(plot_df["shards_int"].unique().tolist())
+    # Check if all block sizes produce the same messages (relative std < 0.1%)
+    ref = agg.groupby("shards_int")["messages_val"]
+    rel_std = (ref.std() / ref.mean() * 100).max()
+    all_same = rel_std < 0.1
 
-    x_positions  = {s: i * 2 for i, s in enumerate(all_shards)}
-    xticks       = [x_positions[s] for s in all_shards]
-    xticklabels  = [str(s) for s in all_shards]
+    fig, ax = plt.subplots(figsize=(12, 6))
 
-    groups      = [block_sizes[:4], block_sizes[4:]]
-    group_names = ["memo_messages_vs_shards_part1.png", "memo_messages_vs_shards_part2.png"]
-    group_grids = [(2, 2), (2, 3)]
+    if all_same:
+        # All block sizes give essentially the same message count — plot one averaged line
+        single = agg.groupby("shards_int")["messages_val"].mean().reset_index()
+        x_vals = [x_positions[s] for s in single["shards_int"]]
+        ax.plot(x_vals, single["messages_val"], marker="o", linewidth=2,
+                markersize=5, color="steelblue", label="All block sizes (identical)")
+        print(f"[info] Messages are essentially identical across all block sizes "
+              f"(max relative std = {rel_std:.4f}%) — plotting single representative line.")
+    else:
+        cmap = plt.cm.get_cmap("tab10", len(block_sizes))
+        for idx, bs in enumerate(block_sizes):
+            sub = agg[agg["block_size_int"] == bs].sort_values("shards_int")
+            x_vals = [x_positions[s] for s in sub["shards_int"]]
+            ax.plot(x_vals, sub["messages_val"], marker="o", linewidth=1.8,
+                    markersize=4, color=cmap(idx), label=f"{bs:,}")
 
-    for group_idx, bs_group in enumerate(groups):
-        bs_group = [b for b in bs_group if b in block_sizes]
-        if not bs_group:
-            continue
+        ax.legend(title="Block Size", fontsize=8, title_fontsize=9,
+                  loc="upper left", ncol=2)
 
-        rows, cols = group_grids[group_idx]
-        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), sharey=False)
-        axes = np.array(axes).reshape(-1)
+    if all_same:
+        ax.legend(fontsize=9)
 
-        legend_handles = legend_labels = None
+    ax.set_xlabel("Number of Shards", fontsize=13)
+    ax.set_ylabel("Messages", fontsize=13)
+    ax.set_title("New Sharded Design: Messages vs Number of Shards", fontsize=14)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
 
-        for i, bs in enumerate(bs_group):
-            ax  = axes[i]
-            sub = plot_df[plot_df["block_size_int"] == bs].copy()
-            if sub.empty:
-                ax.axis("off")
-                continue
+    safe_mkdir(outdir)
+    out_path = os.path.join(outdir, "memo_messages_vs_shards.png")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
 
-            _half = len(all_blocktimes) // 2
-            for _idx, bt in enumerate(all_blocktimes):
-                line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
-                if line_df.empty:
-                    continue
-                x_vals = [x_positions[s] for s in line_df["shards_int"]]
-                ax.plot(x_vals, line_df["messages_val"],
-                        marker="o", linewidth=1.8, markersize=4,
-                        linestyle=":" if _idx < _half else "-",
-                        label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt)))
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
-            ax.set_title(f"Block Size = {bs:,}")
-            ax.set_xlabel("Number of Shards")
-            ax.set_xticks(xticks)
-            ax.set_xticklabels(xticklabels)
-            ax.grid(True, linestyle="--", alpha=0.35)
-
-            if i % cols == 0:
-                ax.set_ylabel("Messages")
-
-            if legend_handles is None:
-                legend_handles, legend_labels = ax.get_legend_handles_labels()
-
-        for j in range(len(bs_group), len(axes)):
-            axes[j].axis("off")
-
-        fig.suptitle("New Sharded Design: Messages vs Number of Shards", fontsize=13)
-        fig.tight_layout(rect=[0, 0.10, 1, 0.95])
-
-        if legend_handles:
-            fig.legend(legend_handles, legend_labels,
-                       loc="lower center",
-                       ncol=min(6, len(legend_labels)),
-                       bbox_to_anchor=(0.5, 0.01),
-                       frameon=True, fontsize=8)
-
-        safe_mkdir(outdir)
-        fig.savefig(os.path.join(outdir, group_names[group_idx]), dpi=300, bbox_inches="tight")
-
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
-
-        print(f"[done] {outdir}/{group_names[group_idx]}")
+    print(f"[done] {out_path}")
 
 
 # ----------------------------
@@ -833,6 +798,8 @@ def main():
     ap.add_argument("--skip_validation", action="store_true")
     ap.add_argument("--skip_sig_schemes", action="store_true",
                     help="Skip per-signature-scheme plot generation")
+    ap.add_argument("--memo_bt_blocksize", type=int, default=None,
+                    help="If set, only plot this block size in the blocktime vs shards graph")
 
     args = ap.parse_args()
     show = not args.no_show
@@ -852,7 +819,7 @@ def main():
         run_memo_messages_vs_shards(memo_csv, args.memo_msg_out, show=show)
 
     if not args.skip_memo_bt:
-        run_memo_blocktime_vs_shards(memo_csv, args.memo_bt_out, show=show)
+        run_memo_blocktime_vs_shards(memo_csv, args.memo_bt_out, show=show, block_size=args.memo_bt_blocksize)
 
     if not args.skip_non:
         run_bubble_nonsharded_vs_memo_s1(non_csv, memo_csv, args.non_out, show=show)
