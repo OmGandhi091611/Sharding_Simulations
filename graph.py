@@ -156,12 +156,11 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
 
     c_currency = pick_col(["currency"])
     c_bs       = pick_col(["block size", "block_size", "blocksize"])
-    c_abt      = pick_col(["average block time", "avg block time", "avg_block_time"])
     c_bt_cfg   = pick_col(["blocktime in configuration file", "configured blocktime", "blocktime"])
     c_tps      = pick_col(["tps"])
 
     missing = [n for n, c in [("currency", c_currency), ("block size", c_bs),
-                               ("average block time", c_abt), ("blocktime in configuration file", c_bt_cfg),
+                               ("blocktime in configuration file", c_bt_cfg),
                                ("tps", c_tps)] if c is None]
     if missing:
         print(f"[skip] non-sharded CSV missing required columns: {missing}")
@@ -178,36 +177,47 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         print("[skip] non-sharded CSV has no rows for btc_hypothetical")
         return
 
-    for c in [c_bs, c_abt, c_bt_cfg, c_tps]:
+    for c in [c_bs, c_bt_cfg, c_tps]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=[c_bs, c_abt, c_bt_cfg, c_tps])
+    df = df.dropna(subset=[c_bs, c_bt_cfg, c_tps])
     if df.empty:
         print("[skip] BTC heatmap has no usable rows after numeric coercion")
         return
 
     df["bs"]      = df[c_bs].astype(float).round().astype(int)
-    df["abt"]     = df[c_abt].astype(float)
+    df["bt_cfg"]  = df[c_bt_cfg].astype(float)
     df["tps_val"] = df[c_tps].astype(float)
 
-    # Y-axis binned into 30-second ranges: 1-30s, 30-60s, 60-90s, ...
-    df["abt_key"] = (df["abt"] // 30).astype(int) * 30
+    block_sizes   = sorted(df["bs"].unique().tolist())
+    bt_cfg_keys   = sorted(df["bt_cfg"].unique().tolist())
 
-    block_sizes = sorted(df["bs"].unique().tolist())
-    abt_keys    = sorted(df["abt_key"].unique().tolist())
-
-    pivot_tps = df.pivot_table(index="abt_key", columns="bs", values="tps_val", aggfunc="mean")
-    pivot_abt = df.pivot_table(index="abt_key", columns="bs", values="abt",     aggfunc="mean")
-    pivot_tps = pivot_tps.reindex(index=abt_keys, columns=block_sizes)
-    pivot_abt = pivot_abt.reindex(index=abt_keys, columns=block_sizes)
+    pivot_tps = df.pivot_table(index="bt_cfg", columns="bs", values="tps_val", aggfunc="mean")
+    pivot_tps = pivot_tps.reindex(index=bt_cfg_keys, columns=block_sizes)
 
     tps_vals  = pivot_tps.values.astype(float)
     was_nan   = np.isnan(tps_vals)
-    # Fill missing cells by averaging adjacent columns, then rows for any remaining gaps
-    tps_filled = pd.DataFrame(tps_vals).interpolate(axis=1, method="linear", limit_direction="both").values
-    tps_filled = pd.DataFrame(tps_filled).interpolate(axis=0, method="linear", limit_direction="both").values
-    masked     = np.ma.masked_invalid(tps_filled)
 
-    n_y, n_x = len(abt_keys), len(block_sizes)
+    # Fill NaN cells using only vertical (top/bottom) neighbors — never sideways
+    tps_filled = tps_vals.copy()
+    n_rows_fill, n_cols_fill = tps_vals.shape
+    for _j in range(n_cols_fill):
+        for _i in range(n_rows_fill):
+            if not np.isnan(tps_vals[_i, _j]):
+                continue
+            top = next((tps_vals[r, _j] for r in range(_i - 1, -1, -1)
+                        if not np.isnan(tps_vals[r, _j])), None)
+            bot = next((tps_vals[r, _j] for r in range(_i + 1, n_rows_fill)
+                        if not np.isnan(tps_vals[r, _j])), None)
+            if top is not None and bot is not None:
+                tps_filled[_i, _j] = (top + bot) / 2
+            elif top is not None:
+                tps_filled[_i, _j] = top
+            elif bot is not None:
+                tps_filled[_i, _j] = bot
+
+    masked = np.ma.masked_invalid(tps_filled)
+
+    n_y, n_x = len(bt_cfg_keys), len(block_sizes)
     x_edges  = np.arange(n_x + 1) - 0.5
     y_edges  = np.arange(n_y + 1) - 0.5
 
@@ -233,7 +243,7 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     ax.set_xticks(range(n_x))
     ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=16)
     ax.set_yticks(range(n_y))
-    ax.set_yticklabels([f"{k+30}s" for k in abt_keys], fontsize=16)
+    ax.set_yticklabels([f"{k:.0f}s" for k in bt_cfg_keys], fontsize=16)
 
     for i in range(n_y):
         for j in range(n_x):
@@ -241,21 +251,18 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
             if np.isnan(tps_val):
                 continue
             tps_str = f"{tps_val:.0f}" if tps_val < 1000 else f"{tps_val/1000:.1f}k"
-            # Pick white or black text based on background luminance (ITU-R BT.709)
             r, g, b, _ = cmap(norm(tps_val))
             lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            base_color = "black" if lum > 0.45 else "white"
-            # Interpolated cells: same contrast rule but slightly muted
             if was_nan[i, j]:
                 color = "#444444" if lum > 0.45 else "#cccccc"
             else:
-                color = base_color
-            style = "italic" if was_nan[i, j] else "normal"
+                color = "black" if lum > 0.45 else "white"
             ax.text(j, i, tps_str, ha="center", va="center",
-                    fontsize=12, color=color, fontweight="bold", fontstyle=style)
+                    fontsize=12, color=color, fontweight="bold",
+                    fontstyle="italic" if was_nan[i, j] else "normal")
 
     ax.set_xlabel("Block Size (tx/block)", fontsize=17)
-    ax.set_ylabel("Actual Average Block Time (s)", fontsize=17)
+    ax.set_ylabel("Configured Mining Time (s)", fontsize=17)
     ax.set_title("TPS Heatmap — BTC Hypothetical (Non-Sharded)", fontsize=18)
 
     cbar = plt.colorbar(im, ax=ax)
@@ -267,6 +274,191 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
         plt.show()
     else:
         plt.close()
+
+
+# ----------------------------
+# 2b) Non-sharded: TPS scatter -> non_sharded_graphs/
+#     X = block size, Y = actual block time (raw), color = TPS
+#     Each dot = one simulation run, no binning or averaging
+# ----------------------------
+def run_nonsharded_scatter(non_csv: str, outdir: str, show: bool):
+    if not os.path.exists(non_csv):
+        print(f"[skip] non-sharded CSV not found: {non_csv}")
+        return
+
+    df = pd.read_csv(non_csv, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    def pick_col(candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    c_currency = pick_col(["currency"])
+    c_bs       = pick_col(["block size", "block_size", "blocksize"])
+    c_abt      = pick_col(["average block time", "avg block time", "avg_block_time"])
+    c_tps      = pick_col(["tps"])
+    c_bt_cfg   = pick_col(["blocktime in configuration file", "configured blocktime", "blocktime"])
+
+    missing = [n for n, c in [("currency", c_currency), ("block size", c_bs),
+                               ("average block time", c_abt), ("tps", c_tps)] if c is None]
+    if missing:
+        print(f"[skip] non-sharded scatter missing columns: {missing}")
+        return
+
+    df[c_currency] = (
+        df[c_currency].astype(str)
+        .str.replace("﻿", "", regex=False)
+        .str.lower().str.strip()
+    )
+    df = df[df[c_currency].eq("btc_hypothetical")].copy()
+    if df.empty:
+        print("[skip] no btc_hypothetical rows for scatter plot")
+        return
+
+    for c in [c_bs, c_abt, c_tps]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=[c_bs, c_abt, c_tps]).copy()
+
+    df["bs"]      = df[c_bs].astype(float).round().astype(int)
+    df["abt"]     = df[c_abt].astype(float)
+    df["tps_val"] = df[c_tps].astype(float)
+
+    block_sizes  = sorted(df["bs"].unique().tolist())
+    x_positions  = {bs: i for i, bs in enumerate(block_sizes)}
+
+    # Small x-jitter so overlapping points don't stack invisibly
+    rng = np.random.default_rng(42)
+    df["x"] = df["bs"].map(x_positions) + rng.uniform(-0.25, 0.25, size=len(df))
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    cmap = plt.matplotlib.colors.LinearSegmentedColormap.from_list(
+        "red_to_skyblue", ["#990000", "#cc4400", "#cc9900", "#0077bb"]
+    )
+    norm = plt.Normalize(vmin=df["tps_val"].min(), vmax=df["tps_val"].max())
+
+    sc = ax.scatter(
+        df["x"], df["abt"],
+        c=df["tps_val"], cmap=cmap, norm=norm,
+        s=200, alpha=0.85, edgecolors="none"
+    )
+
+    cbar = plt.colorbar(sc, ax=ax)
+    cbar.set_label("TPS", fontsize=13)
+    cbar.ax.tick_params(labelsize=11)
+
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(block_sizes)))
+    ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=11)
+    ax.set_xlabel("Block Size (tx/block)", fontsize=13)
+    ax.set_ylabel("Actual Mining Time (s)", fontsize=13)
+    ax.set_title("Non-Sharded TPS Scatter — BTC Hypothetical\n"
+                 "Each point = one simulation run; color = TPS", fontsize=13)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+
+    savefig(outdir, "nonsharded_tps_scatter.png")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ----------------------------
+# 2c) Non-sharded: Actual Block Time vs Block Size -> non_sharded_graphs/
+#     One line per configured blocktime
+# ----------------------------
+def run_nonsharded_blocktime_vs_blocksize(non_csv: str, outdir: str, show: bool):
+    if not os.path.exists(non_csv):
+        print(f"[skip] non-sharded CSV not found: {non_csv}")
+        return
+
+    df = pd.read_csv(non_csv, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    def pick_col(candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    c_currency = pick_col(["currency"])
+    c_bs       = pick_col(["block size", "block_size", "blocksize"])
+    c_abt      = pick_col(["average block time", "avg block time", "avg_block_time"])
+    c_bt_cfg   = pick_col(["blocktime in configuration file", "configured blocktime", "blocktime"])
+
+    missing = [n for n, c in [("currency", c_currency), ("block size", c_bs),
+                               ("average block time", c_abt),
+                               ("blocktime in configuration file", c_bt_cfg)] if c is None]
+    if missing:
+        print(f"[skip] non-sharded CSV missing columns for block time plot: {missing}")
+        return
+
+    df[c_currency] = (
+        df[c_currency].astype(str)
+        .str.replace("﻿", "", regex=False)
+        .str.lower().str.strip()
+    )
+    df = df[df[c_currency].eq("btc_hypothetical")].copy()
+    if df.empty:
+        print("[skip] no btc_hypothetical rows for block time vs block size plot")
+        return
+
+    for c in [c_bs, c_abt, c_bt_cfg]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=[c_bs, c_abt, c_bt_cfg]).copy()
+
+    df["bs"]         = df[c_bs].astype(float).round().astype(int)
+    df["abt"]        = df[c_abt].astype(float)
+    df["bt_cfg"]     = df[c_bt_cfg].astype(float).round(6)
+
+    # Average actual block time per (configured blocktime, block size)
+    agg = (
+        df.groupby(["bt_cfg", "bs"])["abt"]
+        .mean()
+        .reset_index()
+        .sort_values(["bt_cfg", "bs"])
+    )
+
+    block_sizes   = sorted(agg["bs"].unique().tolist())
+    blocktimes    = sorted(agg["bt_cfg"].unique().tolist())
+    x_positions   = {bs: i * 2 for i, bs in enumerate(block_sizes)}
+    xticks        = [x_positions[bs] for bs in block_sizes]
+    xticklabels   = [str(bs) for bs in block_sizes]
+
+    fig, ax = plt.subplots(figsize=(14, 10))
+
+    n_colors   = 10
+    palette    = [plt.cm.tab10(i) for i in range(n_colors)]
+    linestyles = ["-", ":"]   # solid for first cycle, dotted when colors repeat
+
+    for idx, bt in enumerate(blocktimes):
+        sub = agg[agg["bt_cfg"] == bt].sort_values("bs")
+        x_vals    = [x_positions[bs] for bs in sub["bs"]]
+        label     = f"{bt:.0f}s" if bt >= 1 else f"{bt:.2f}s"
+        color     = palette[idx % n_colors]
+        linestyle = linestyles[idx // n_colors % len(linestyles)]
+        ax.plot(x_vals, sub["abt"], marker="o", linewidth=1.8, markersize=5,
+                label=label, color=color, linestyle=linestyle)
+
+    ax.set_xlabel("Block Size (tx/block)", fontsize=13)
+    ax.set_ylabel("Actual Avg Block Time (s)", fontsize=13)
+    ax.set_title("Non-Sharded: Actual Mining Time vs Block Size (BTC Hypothetical)", fontsize=14)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticklabels, rotation=45, ha="right")
+    ax.legend(title="Configured\nMining Time", fontsize=9, title_fontsize=9,
+              loc="upper right", ncol=2)
+    ax.set_yscale("log")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, "nonsharded_blocktime_vs_blocksize.png")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # ----------------------------
@@ -795,6 +987,8 @@ def main():
     ap.add_argument("--skip_memo_msg", action="store_true")
     ap.add_argument("--skip_memo_bt", action="store_true")
     ap.add_argument("--skip_non", action="store_true")
+    ap.add_argument("--skip_non_scatter", action="store_true")
+    ap.add_argument("--skip_non_bt", action="store_true")
     ap.add_argument("--skip_validation", action="store_true")
     ap.add_argument("--skip_sig_schemes", action="store_true",
                     help="Skip per-signature-scheme plot generation")
@@ -823,6 +1017,12 @@ def main():
 
     if not args.skip_non:
         run_bubble_nonsharded_vs_memo_s1(non_csv, memo_csv, args.non_out, show=show)
+
+    if not args.skip_non_scatter:
+        run_nonsharded_scatter(non_csv, args.non_out, show=show)
+
+    if not args.skip_non_bt:
+        run_nonsharded_blocktime_vs_blocksize(non_csv, args.non_out, show=show)
 
     if not args.skip_validation:
         run_validation(val_csv, args.val_out, show=show)
