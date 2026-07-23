@@ -500,16 +500,31 @@ Three network conditions model different deployment environments. Each writes to
 
 | Condition | `rtt_ms` | `control_bw_mbps` | `results_csv` | Graph folder |
 |---|---|---|---|---|
-| Local | 2 | 2 000 | `memo_results_local.csv` | `memo_graphs_local/` |
-| US WAN | 50 | 200 | `memo_results_usa.csv` | `memo_graphs_usa/` |
-| Global WAN | 150 | 100 | `memo_results_global.csv` | `memo_graphs_global/` |
+| Local | 0.3 | 10 000 | `memo_results_local.csv` | `memo_graphs_local/` |
+| US WAN | 60 | 1 000 | `memo_results_usa.csv` | `memo_graphs_usa/` |
+| Global WAN | 180 | 50 | `memo_results_global.csv` | `memo_graphs_global/` |
+
+`Local` models a single-rack, top-of-rack-switch deployment: ~0.3ms RTT (realistic
+same-rack round-trip including software/OS network-stack overhead — pure switch/wire
+latency is often even lower, tens of microseconds) and 10 Gbps of control-plane
+bandwidth (a modest slice of a modern 10-100 Gbps host NIC).
+
+`US WAN` models a cross-country private backbone (e.g. NYC ↔ SF): ~60ms RTT (matches
+published cloud inter-region latencies) and 1 Gbps of control-plane bandwidth (a
+well-provisioned but not fully dedicated leased-line/cloud-backbone allocation).
+
+`Global WAN` models intercontinental P2P nodes on ordinary internet connections
+(not a private hyperscaler backbone): ~180ms RTT (representative of US↔Asia/Australia
+routes, the harsher end of "global" rather than just transatlantic) and only 50 Mbps
+of control-plane bandwidth, reflecting typical realistic uplink capacity for a single
+globally-distributed peer.
 
 Edit `memo_config/base.json` before each sweep:
 
 ```json
-{ "rtt_ms": 2,   "control_bw_mbps": 2000 }   // Local
-{ "rtt_ms": 50,  "control_bw_mbps": 200  }   // US WAN
-{ "rtt_ms": 150, "control_bw_mbps": 100  }   // Global WAN
+{ "rtt_ms": 0.3, "control_bw_mbps": 10000 }  // Local
+{ "rtt_ms": 60,  "control_bw_mbps": 1000 }   // US WAN
+{ "rtt_ms": 180, "control_bw_mbps": 50   }   // Global WAN
 ```
 
 ---

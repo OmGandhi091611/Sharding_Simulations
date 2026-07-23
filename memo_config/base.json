@@ -1,7 +1,7 @@
 {
   "currency": "memo",
   "nodes": 1024,
-  "neighbors": 50,
+  "neighbors": 512,
   "miners": 1024,
   "hashrate": 1000000,
   "wallets": 10240,
@@ -11,15 +11,19 @@
   "halving_interval": 0,
   "init_reward": 51.8457072,
   "tx_cost_ms": 0.04,
-  "rtt_ms": 70,
+  "rtt_ms": 180,
   "coord_rounds": 1,
   "cost": 0,
   "msg_size": 64,
-  "control_bw_mbps": 1000,
+  "control_bw_mbps": 50,
   "overlap_broadcast": true,
   "msg_proc_ms": 0.05,
   "prefill": true,
   "leader_metronome": true,
   "no_metronome": false,
-  "verify_mode": "shard"
+  "verify_mode": "shard",
+  "broadcast_protocol": "gossip",
+  "shard_comm_protocol": "kademlia",
+  "gossip_fanout": 512,
+  "kademlia_bucket_bits": 1
 }

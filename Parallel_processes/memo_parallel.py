@@ -45,6 +45,19 @@ SIG_SCHEMES = [
     # "sphincs_sha2_128s",
 ]
 
+# Communication protocols to sweep — uncomment the baseline to compare
+# gossip/Kademlia against the original flat flood/direct model. Only
+# takes effect when the base config has "leader_metronome": true.
+BROADCAST_PROTOCOLS = [
+    "gossip",
+    # "flood",
+]
+
+SHARD_COMM_PROTOCOLS = [
+    "kademlia",
+    # "direct",
+]
+
 BLOCK_SIZES = [
     1024,
     2048,
@@ -91,29 +104,42 @@ MAX_WORKERS = int(os.environ.get(
 # Build combination list
 # ------------------------------------------------------------------ #
 
+TOTAL_NODES     = 1024
+TOTAL_NEIGHBORS = 512
+TOTAL_MINERS    = 1024
+
+
 def build_grid() -> List[Dict[str, Any]]:
     combos = []
-    for shards, blocksize, blocktime, sig in itertools.product(
-            SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES, SIG_SCHEMES):
+    for shards, blocksize, blocktime, sig, bprot, scomm in itertools.product(
+            SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES, SIG_SCHEMES,
+            BROADCAST_PROTOCOLS, SHARD_COMM_PROTOCOLS):
 
-        nodes        = {128: 256, 256: 512, 512: 1000}.get(shards, 100)
-        miners       = nodes
-        neighbors    = min(50, nodes - 1)
+        # Fixed across all shard counts so the sweep is an apples-to-apples
+        # comparison — only shards/blocksize/blocktime/protocol vary.
+        nodes        = TOTAL_NODES
+        miners       = TOTAL_MINERS
+        neighbors    = TOTAL_NEIGHBORS
         transactions = blocksize * 1000
         wallets      = transactions
 
-        name = f"s{shards}_bs{blocksize}_bt{blocktime:.5f}_{sig}".replace(".", "p")
+        # sig stays last in the name so merge_run_csvs_by_scheme's
+        # "*_{scheme}.csv" glob still matches.
+        name = (f"s{shards}_bs{blocksize}_bt{blocktime:.5f}_"
+                f"{bprot}_{scomm}_{sig}").replace(".", "p")
         combos.append({
-            "name":            name,
-            "shards":          shards,
-            "total_blocksize": blocksize,
-            "blocktime":       blocktime,
-            "nodes":           nodes,
-            "miners":          miners,
-            "neighbors":       neighbors,
-            "transactions":    transactions,
-            "wallets":         wallets,
-            "sig_scheme":      sig,
+            "name":                 name,
+            "shards":               shards,
+            "total_blocksize":      blocksize,
+            "blocktime":            blocktime,
+            "nodes":                nodes,
+            "miners":               miners,
+            "neighbors":            neighbors,
+            "transactions":         transactions,
+            "wallets":              wallets,
+            "sig_scheme":           sig,
+            "broadcast_protocol":   bprot,
+            "shard_comm_protocol":  scomm,
         })
     return combos
 
@@ -150,6 +176,8 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--wallets",         str(combo["wallets"])]
     cmd += ["--blocks",          "1000"]
     cmd += ["--sig_scheme",      combo["sig_scheme"]]
+    cmd += ["--broadcast_protocol",  combo["broadcast_protocol"]]
+    cmd += ["--shard_comm_protocol", combo["shard_comm_protocol"]]
 
     # Suppress per-block prints - too noisy for hundreds of runs
     cmd += ["--quiet_blocks"]
@@ -295,8 +323,21 @@ def _python_fallback_merge(csvs, final_csv):
 # Skip-completed filter
 # ------------------------------------------------------------------ #
 
+# Protocol columns are included in the dedup key so that e.g. a gossip
+# run and a flood run of the same shard/blocksize/blocktime combo (which
+# can legitimately land on a similar tps/avg_block_time) don't get
+# mistaken for each other and falsely skipped.
+def _row_key(row: dict) -> tuple:
+    return (
+        row.get("tps", "").strip(),
+        row.get("average block time", "").strip(),
+        row.get("broadcast_protocol", "").strip(),
+        row.get("shard_comm_protocol", "").strip(),
+    )
+
+
 def load_merged_tps_keys(results_dir: str, sig_schemes: List[str]) -> set:
-    """Read final merged CSVs once → set of (tps, avg_block_time) strings already merged."""
+    """Read final merged CSVs once → set of dedup keys already merged."""
     import csv
     merged = set()
     for scheme in sig_schemes:
@@ -307,7 +348,7 @@ def load_merged_tps_keys(results_dir: str, sig_schemes: List[str]) -> set:
             with open(final_csv, newline="") as f:
                 for row in csv.DictReader(f):
                     try:
-                        merged.add((row["tps"].strip(), row["average block time"].strip()))
+                        merged.add(_row_key(row))
                     except KeyError:
                         continue
             print(f"[skip-check] {len(merged)} rows loaded from {os.path.basename(final_csv)}")
@@ -319,7 +360,7 @@ def load_merged_tps_keys(results_dir: str, sig_schemes: List[str]) -> set:
 def needs_run(combo: dict, runs_dir: str, merged_keys: set) -> bool:
     """A combo needs to run if:
     - its per-run CSV doesn't exist (never ran), OR
-    - its per-run CSV TPS/avg_block_time matches the merged CSV
+    - its per-run CSV matches the merged CSV on tps/avg_block_time/protocol
       (stale data from a previous batch, not from the current missing-tests run)."""
     import csv
     per_run_csv = os.path.join(runs_dir, f"{combo['name']}.csv")
@@ -328,7 +369,7 @@ def needs_run(combo: dict, runs_dir: str, merged_keys: set) -> bool:
     try:
         with open(per_run_csv, newline="") as f:
             for row in csv.DictReader(f):
-                key = (row["tps"].strip(), row["average block time"].strip())
+                key = _row_key(row)
                 if key in merged_keys:
                     return True  # stale — same as what's already merged
                 return False     # fresh result not yet in merged CSV, skip
@@ -357,9 +398,13 @@ def main():
 
     print(f"Parallel grid runner")
     print(f"  Shards      : {SHARD_COUNTS}")
+    print(f"  Nodes/Miners: {TOTAL_NODES} / {TOTAL_MINERS} (fixed across all shard counts)")
+    print(f"  Neighbors   : {TOTAL_NEIGHBORS}")
     print(f"  Block sizes : {BLOCK_SIZES}")
     print(f"  Block times : {BLOCK_TIMES}")
     print(f"  Sig schemes : {SIG_SCHEMES}")
+    print(f"  Broadcast   : {BROADCAST_PROTOCOLS}")
+    print(f"  Shard comm  : {SHARD_COMM_PROTOCOLS}")
     print(f"  Total runs  : {total}")
     print(f"  Workers     : {MAX_WORKERS}  (set GRID_WORKERS=N to override)")
     print(f"  Base config : {BASE_CONFIG}")
