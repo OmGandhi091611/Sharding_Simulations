@@ -11,11 +11,11 @@
   "halving_interval": 0,
   "init_reward": 51.8457072,
   "tx_cost_ms": 0.04,
-  "rtt_ms": 180,
+  "rtt_ms": 0.3,
   "coord_rounds": 1,
   "cost": 0,
   "msg_size": 64,
-  "control_bw_mbps": 50,
+  "control_bw_mbps": 10000,
   "overlap_broadcast": true,
   "msg_proc_ms": 0.05,
   "prefill": true,
@@ -24,6 +24,6 @@
   "verify_mode": "shard",
   "broadcast_protocol": "gossip",
   "shard_comm_protocol": "kademlia",
-  "gossip_fanout": 512,
+  "gossip_fanout": 10,
   "kademlia_bucket_bits": 1
 }

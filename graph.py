@@ -1069,6 +1069,47 @@ def run_near_vs_targets(near_csv: str, outdir: str, show: bool):
 
 
 # ----------------------------
+# 7) Hop-count CDF -> given outdir (from simulation.py's write_hop_cdf())
+# ----------------------------
+def run_hop_cdf(hop_cdf_csv: str, outdir: str, show: bool):
+    if not os.path.exists(hop_cdf_csv):
+        print(f"[skip] hop-count CDF CSV not found: {hop_cdf_csv}")
+        return
+
+    df = pd.read_csv(hop_cdf_csv)
+    if "hop_count" not in df.columns or "cumulative_fraction" not in df.columns:
+        print(f"[skip] {hop_cdf_csv} missing hop_count/cumulative_fraction columns")
+        return
+
+    df = ensure_numeric(df, ["hop_count", "cumulative_fraction"]).dropna()
+    df = df.sort_values("hop_count")
+    if df.empty:
+        print(f"[skip] {hop_cdf_csv} has no usable rows")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.step(df["hop_count"], df["cumulative_fraction"], where="post",
+            linewidth=2, color="#1f77b4")
+    ax.axhline(0.5, linestyle="--", alpha=0.3, color="gray")
+    ax.axhline(0.9, linestyle="--", alpha=0.3, color="gray")
+
+    ax.set_xlabel("Hop count", fontsize=13)
+    ax.set_ylabel("Fraction of network informed", fontsize=13)
+    ax.set_title("Hop-Count CDF — Broadcast Delivery by Hop", fontsize=13)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+    ax.set_ylim(0, 1.02)
+    ax.set_xlim(left=0)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+
+    savefig(outdir, "hop_cdf.png")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ----------------------------
 # Main
 # ----------------------------
 def main():
@@ -1113,6 +1154,13 @@ def main():
     ap.add_argument("--skip_common", action="store_true",
                     help="Skip common cross-environment graphs")
 
+    ap.add_argument("--hop_cdf_csv", default="hop_cdf.csv",
+                    help="Hop-count CDF CSV written by simulation.py's write_hop_cdf()")
+    ap.add_argument("--hop_cdf_out", default="hop_cdf_graphs",
+                    help="Output folder for the hop-count CDF plot")
+    ap.add_argument("--skip_hop_cdf", action="store_true",
+                    help="Skip the hop-count CDF plot")
+
     args = ap.parse_args()
     show = not args.no_show
 
@@ -1144,6 +1192,10 @@ def main():
 
     if not args.skip_validation:
         run_validation(val_csv, args.val_out, show=show)
+
+    if not args.skip_hop_cdf:
+        hop_cdf_csv = os.path.join(args.results_dir, args.hop_cdf_csv)
+        run_hop_cdf(hop_cdf_csv, args.hop_cdf_out, show=show)
 
     if not args.skip_common:
         local_csv  = os.path.join(args.results_dir, args.memo_local_csv)

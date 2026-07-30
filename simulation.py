@@ -48,6 +48,14 @@ total_coins = 0.0     # minted coins
 # charged to any single round's critical-path delay — see the note in
 # gossip_broadcast_delay() for why.
 total_broadcast_cpu_seconds = 0.0
+# Every node's hop-count-to-first-delivery, pooled across every block's
+# final-propagation broadcast for the whole run. Raw material for the
+# hop-count CDF: sort this and take cumulative fractions.
+hop_cdf_samples: List[int] = []
+# Per-block record of the final-propagation broadcast (block_number, rounds,
+# messages, coverage) — opt-in via --per_block_csv. Lets you see how a block's
+# rounds/messages evolve over the run, e.g. Plumtree's tree converging.
+per_block_log: List[Tuple[int, int, int, float]] = []
 
 # Pool modeling:
 # - count mode: integer count of pending tx (fastest)
@@ -73,6 +81,9 @@ PLUMTREE_LAZY_FANOUT = 2      # non-tree neighbors sent an IHAVE per node per ro
 GOSSIPSUB_MESH_DEGREE = 8     # peers sent the FULL message per node per round
 GOSSIPSUB_IHAVE_FANOUT = 4    # remaining neighbors sent an IHAVE per node per round
 ANNOUNCE_MSG_SIZE_BYTES = 32  # lightweight IHAVE/announcement size (message-ID only)
+HOP_TTL = 64            # fixed per-broadcast hop/round cap (real-world TTL-style bound,
+                        # e.g. IP's default TTL=64 — independent of network size/fanout,
+                        # unlike the dynamically-computed gossip_ttl() estimate)
 
 
 # ============================================================
@@ -203,7 +214,9 @@ def _gossip_peers(node_idx: int, adjacency: List[List[int]], fanout: int) -> Lis
 
 
 def simulate_gossip(source_idx: int, adjacency: List[List[int]], fanout: int,
-                     ttl: Optional[int] = None) -> Tuple[int, int, float]:
+                     ttl: Optional[int] = None,
+                     events: Optional[List[dict]] = None
+                     ) -> Tuple[int, int, float, Dict[int, int]]:
     """
     Round-based epidemic broadcast from `source_idx`, constrained to the
     fixed neighbor topology in `adjacency` (same graph flooding uses) rather
@@ -212,25 +225,30 @@ def simulate_gossip(source_idx: int, adjacency: List[List[int]], fanout: int,
     Each round, every newly-informed node (the "frontier") forwards to
     `fanout` random neighbors. A node that already holds the message discards
     a repeat delivery instead of re-forwarding it (seen-flag dedup) — this
-    is what bounds the broadcast, not the TTL. TTL is only a safety cap in
-    case coverage stalls (e.g. a poorly connected neighbor graph or unlucky
-    sampling); if hit, coverage may be < 1.0, which is itself a useful metric.
+    is what bounds the broadcast, not the TTL. TTL is a fixed, real-world-
+    style hop cap (default HOP_TTL=64, independent of network size or
+    fanout — analogous to IP's default TTL) rather than a size-derived
+    estimate; if hit before full coverage, coverage may be < 1.0, which is
+    itself a useful metric.
 
-    Returns (rounds_used, total_messages_sent, coverage_fraction).
-    Message counts include deliveries to already-informed nodes, since
-    bandwidth/CPU cost is paid on send regardless of whether the receiver
-    needed the message.
+    Returns (rounds_used, total_messages_sent, coverage_fraction, first_seen).
+    `first_seen` maps node id -> the round it first received the message
+    (source is 0); this is the raw per-node hop-count data a CDF of
+    delivery-by-hop gets built from. Message counts include deliveries to
+    already-informed nodes, since bandwidth/CPU cost is paid on send
+    regardless of whether the receiver needed the message.
     """
     N = max(1, len(adjacency))
     k = max(0, int(fanout))
     if N <= 1:
-        return 0, 0, 1.0
+        return 0, 0, 1.0, {source_idx: 0}
 
     if ttl is None:
-        ttl = gossip_ttl(N, k)
+        ttl = HOP_TTL
 
     informed = {source_idx}
     frontier = {source_idx}
+    first_seen: Dict[int, int] = {source_idx: 0}
     total_messages = 0
     rounds_used = 0
 
@@ -242,15 +260,20 @@ def simulate_gossip(source_idx: int, adjacency: List[List[int]], fanout: int,
         for node in frontier:
             for peer in _gossip_peers(node, adjacency, k):
                 total_messages += 1
-                if peer not in informed:
+                is_new = peer not in informed
+                if events is not None:
+                    events.append({"round": r, "kind": "gossip_forward",
+                                    "from": node, "to": peer, "new": is_new})
+                if is_new:
                     informed.add(peer)
+                    first_seen[peer] = r
                     next_frontier.add(peer)
         frontier = next_frontier
         if len(informed) >= N:
             break
 
     coverage = len(informed) / N
-    return rounds_used, total_messages, coverage
+    return rounds_used, total_messages, coverage, first_seen
 
 
 def gossip_broadcast_delay(rounds: int, total_messages: int, msg_size_bytes: int) -> float:
@@ -312,10 +335,14 @@ def gossip_broadcast_delay(rounds: int, total_messages: int, msg_size_bytes: int
 def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                                 link_state: Dict[int, Dict[int, str]],
                                 lazy_fanout: int = 2,
-                                ttl: Optional[int] = None
-                                ) -> Tuple[int, int, int, int, int, float]:
+                                ttl: Optional[int] = None,
+                                events: Optional[List[dict]] = None
+                                ) -> Tuple[int, int, int, int, int, float, Dict[int, int]]:
     """
-    Returns (rounds, eager_messages, lazy_messages, prunes, grafts, coverage).
+    Returns (rounds, eager_messages, lazy_messages, prunes, grafts, coverage,
+    first_seen). `first_seen` maps node id -> the round it first received
+    the message (source is 0) — the raw per-node hop-count data a CDF of
+    delivery-by-hop gets built from.
 
     Eager sends are never capped — they're exactly the (small, converged)
     tree edges, and capping them would break coverage. Lazy IHAVE sends
@@ -327,14 +354,14 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
     """
     N = len(adjacency)
     if N <= 1:
-        return 0, 0, 0, 0, 0, 1.0
+        return 0, 0, 0, 0, 0, 1.0, {source_idx: 0}
 
     if ttl is None:
-        avg_degree = max(1, sum(len(a) for a in adjacency) // max(1, N))
-        ttl = gossip_ttl(N, avg_degree)
+        ttl = HOP_TTL
 
     informed = {source_idx}
     frontier = {source_idx}
+    first_seen: Dict[int, int] = {source_idx: 0}
     eager_messages = 0
     lazy_messages = 0
     prunes = 0
@@ -360,18 +387,30 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                 eager_messages += 1
                 if peer not in informed:
                     informed.add(peer)
+                    first_seen[peer] = rounds
                     next_frontier.add(peer)
+                    if events is not None:
+                        events.append({"round": rounds, "kind": "eager",
+                                        "from": node, "to": peer, "outcome": "new"})
                 else:
                     # peer already had it — this eager push was wasted;
                     # peer would PRUNE this link, demoting it to lazy.
                     node_state[peer] = "lazy"
                     prunes += 1
+                    if events is not None:
+                        events.append({"round": rounds, "kind": "eager",
+                                        "from": node, "to": peer, "outcome": "redundant_pruned"})
 
             lazy_targets = random.sample(
                 lazy_peers, min(max(0, lazy_fanout), len(lazy_peers)))
             for peer in lazy_targets:
                 lazy_messages += 1
-                if peer not in informed:
+                informed_already = peer in informed
+                if events is not None:
+                    events.append({"round": rounds, "kind": "lazy_ihave",
+                                    "from": node, "to": peer,
+                                    "informed_already": informed_already})
+                if not informed_already:
                     pending_lazy.setdefault(peer, node)
 
         # GRAFT: anyone who only heard a lazy IHAVE this round (no eager
@@ -383,14 +422,18 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                 eager_messages += 1
                 grafts += 1
                 informed.add(peer)
+                first_seen[peer] = rounds
                 next_frontier.add(peer)
+                if events is not None:
+                    events.append({"round": rounds, "kind": "graft",
+                                    "from": grafter, "to": peer})
 
         frontier = next_frontier
         if len(informed) >= N:
             break
 
     coverage = len(informed) / N
-    return rounds, eager_messages, lazy_messages, prunes, grafts, coverage
+    return rounds, eager_messages, lazy_messages, prunes, grafts, coverage, first_seen
 
 
 def plumtree_broadcast_delay(rounds: int, eager_messages: int, lazy_messages: int,
@@ -428,7 +471,9 @@ def plumtree_broadcast_delay(rounds: int, eager_messages: int, lazy_messages: in
 # ============================================================
 def simulate_gossipsub(source_idx: int, adjacency: List[List[int]],
                        mesh_degree: int = 8, ihave_fanout: int = 4,
-                       ttl: Optional[int] = None) -> Tuple[int, int, int, float]:
+                       ttl: Optional[int] = None,
+                       events: Optional[List[dict]] = None
+                       ) -> Tuple[int, int, int, float, Dict[int, int]]:
     """
     GossipSub pushes the FULL message to only `mesh_degree` peers per
     node per round — a small, fixed "mesh" subset, unlike naive gossip
@@ -440,16 +485,20 @@ def simulate_gossipsub(source_idx: int, adjacency: List[List[int]],
     IHAVE directly (a stand-in for that one extra request/response hop)
     rather than simulating the full pull exchange.
 
-    Returns (rounds, full_messages, ihave_messages, coverage).
+    Returns (rounds, full_messages, ihave_messages, coverage, first_seen).
+    `first_seen` maps node id -> the round it first received the message
+    (source is 0) — the raw per-node hop-count data a CDF of
+    delivery-by-hop gets built from.
     """
     N = len(adjacency)
     if N <= 1:
-        return 0, 0, 0, 1.0
+        return 0, 0, 0, 1.0, {source_idx: 0}
     if ttl is None:
-        ttl = gossip_ttl(N, max(1, mesh_degree))
+        ttl = HOP_TTL
 
     informed = {source_idx}
     frontier = {source_idx}
+    first_seen: Dict[int, int] = {source_idx: 0}
     full_messages = 0
     ihave_messages = 0
     rounds_used = 0
@@ -464,22 +513,32 @@ def simulate_gossipsub(source_idx: int, adjacency: List[List[int]],
             mesh_peers = set(random.sample(candidates, min(mesh_degree, len(candidates))))
             for peer in mesh_peers:
                 full_messages += 1
-                if peer not in informed:
+                is_new = peer not in informed
+                if events is not None:
+                    events.append({"round": r, "kind": "mesh_push",
+                                    "from": node, "to": peer, "new": is_new})
+                if is_new:
                     informed.add(peer)
+                    first_seen[peer] = r
                     next_frontier.add(peer)
             remaining = [p for p in candidates if p not in mesh_peers]
             ihave_peers = random.sample(remaining, min(ihave_fanout, len(remaining)))
             for peer in ihave_peers:
                 ihave_messages += 1
-                if peer not in informed:
+                is_new = peer not in informed
+                if events is not None:
+                    events.append({"round": r, "kind": "ihave",
+                                    "from": node, "to": peer, "new": is_new})
+                if is_new:
                     informed.add(peer)
+                    first_seen[peer] = r
                     next_frontier.add(peer)
         frontier = next_frontier
         if len(informed) >= N:
             break
 
     coverage = len(informed) / N
-    return rounds_used, full_messages, ihave_messages, coverage
+    return rounds_used, full_messages, ihave_messages, coverage, first_seen
 
 
 def gossipsub_broadcast_delay(rounds: int, full_messages: int, ihave_messages: int,
@@ -850,14 +909,21 @@ def to_leader_phase(S: int, msg_size: int):
 def broadcast_phase(protocol: str, source_node: int, N: int,
                      adjacency: List[List[int]], msg_size: int,
                      plumtree_state: Optional[Dict[int, Dict[int, str]]] = None
-                     ) -> Tuple[float, int, float, int]:
+                     ) -> Tuple[float, int, float, int, Dict[int, int]]:
     """
     Dispatches the leader's "I won" announcement (or the final block
     announcement) to the selected broadcast protocol, returning a common
-    (dt, messages, coverage, rounds) shape regardless of which one runs —
-    callers don't need protocol-specific branching. Callers that don't
-    need the delay (e.g. the final propagation stats pass, which doesn't
-    cost round time) can simply discard `dt`.
+    (dt, messages, coverage, rounds, first_seen) shape regardless of which
+    one runs — callers don't need protocol-specific branching. Callers
+    that don't need the delay (e.g. the final propagation stats pass,
+    which doesn't cost round time) can simply discard `dt`.
+
+    `first_seen` maps node id -> the round/hop it first received the
+    message — the raw per-node data a CDF of delivery-by-hop is built
+    from. For "flood" there's no round-by-round structure to draw this
+    from (it's a flat one-shot broadcast), so it's synthesized as
+    "everyone but the source arrives at hop 1", matching flood's own
+    idealized single-hop assumption.
 
     `plumtree_state` must be the SAME dict passed across every call for
     the life of a run when protocol=="plumtree" — it's Plumtree's
@@ -865,24 +931,26 @@ def broadcast_phase(protocol: str, source_node: int, N: int,
     persists across broadcasts rather than being rebuilt each time.
     """
     if protocol == "gossip":
-        rounds, messages, coverage = simulate_gossip(source_node, adjacency, GOSSIP_FANOUT)
+        rounds, messages, coverage, first_seen = simulate_gossip(
+            source_node, adjacency, GOSSIP_FANOUT)
         dt = gossip_broadcast_delay(rounds, messages, msg_size)
-        return dt, messages, coverage, rounds
+        return dt, messages, coverage, rounds, first_seen
     elif protocol == "plumtree":
         if plumtree_state is None:
             plumtree_state = {}
-        rounds, eager, lazy, _prunes, _grafts, coverage = simulate_adaptive_plumtree(
+        rounds, eager, lazy, _prunes, _grafts, coverage, first_seen = simulate_adaptive_plumtree(
             source_node, adjacency, plumtree_state, PLUMTREE_LAZY_FANOUT)
         dt = plumtree_broadcast_delay(rounds, eager, lazy, msg_size)
-        return dt, eager + lazy, coverage, rounds
+        return dt, eager + lazy, coverage, rounds, first_seen
     elif protocol == "gossipsub":
-        rounds, full, ihave, coverage = simulate_gossipsub(
+        rounds, full, ihave, coverage, first_seen = simulate_gossipsub(
             source_node, adjacency, GOSSIPSUB_MESH_DEGREE, GOSSIPSUB_IHAVE_FANOUT)
         dt = gossipsub_broadcast_delay(rounds, full, ihave, msg_size)
-        return dt, full + ihave, coverage, rounds
+        return dt, full + ihave, coverage, rounds, first_seen
     else:  # "flood": the original flat O(N) one-shot broadcast baseline
         dt, messages = leader_announce_phase(N, msg_size)
-        return dt, messages, 1.0, 0
+        first_seen = {i: (0 if i == source_node else 1) for i in range(N)}
+        return dt, messages, 1.0, 0, first_seen
 
 
 def to_leader_kademlia_phase(num_senders: int, dht_size: int, msg_size: int,
@@ -990,7 +1058,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
         # GossipSub/Kademlia can be compared against the original flat
         # flood/direct baseline.
         leader_node = random.randrange(N) if N > 0 else 0
-        dt_ann, msgs_ann, ann_coverage, ann_rounds = broadcast_phase(
+        dt_ann, msgs_ann, ann_coverage, ann_rounds, _ann_first_seen = broadcast_phase(
             broadcast_protocol, leader_node, N, adjacency, msg_size, plumtree_state)
 
         if shard_comm_protocol == "kademlia":
@@ -1049,12 +1117,16 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
         if broadcast_protocol == "flood":
             env.process(random.choice(nodes).receive(b))
             prop_rounds, prop_coverage = 0, 1.0
+            prop_msgs = max(0, N - 1)
+            prop_first_seen = {i: (0 if i == 0 else 1) for i in range(N)}
         else:
             prop_source = random.randrange(N) if N > 0 else 0
-            _, prop_msgs, prop_coverage, prop_rounds = broadcast_phase(
+            _, prop_msgs, prop_coverage, prop_rounds, prop_first_seen = broadcast_phase(
                 broadcast_protocol, prop_source, N, adjacency, msg_size, plumtree_state)
             io_requests += prop_msgs
             network_data += prop_msgs * b.size
+        hop_cdf_samples.extend(prop_first_seen.values())
+        per_block_log.append((bc, prop_rounds, prop_msgs, prop_coverage))
 
         reward = _apply_halving_and_mint(bc, reward, halving_interval)
 
@@ -1148,6 +1220,78 @@ def _print_final(now, bc, blocks_limit, diff, total_hash,
     )
 
 
+def write_hop_cdf(results_dir: str, out_name: str = "hop_cdf.csv") -> Optional[Dict[str, float]]:
+    """
+    Computes and writes the empirical CDF of `hop_cdf_samples` — every
+    node's hop-count-to-first-delivery, pooled across every block's final
+    propagation broadcast this run — and prints the key percentiles.
+
+    Returns the percentile summary (hop_p50/hop_p90/hop_p99/hop_max) so
+    callers can fold it into a per-run results row, or None if there were
+    no samples (e.g. not using the leader-metronome coordinator).
+    """
+    if not hop_cdf_samples:
+        return None
+    samples = sorted(hop_cdf_samples)
+    n = len(samples)
+
+    rows = []
+    i = 0
+    while i < n:
+        h = samples[i]
+        j = i
+        while j < n and samples[j] == h:
+            j += 1
+        rows.append((h, j / n))
+        i = j
+
+    path = Path(results_dir) / out_name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["hop_count", "cumulative_fraction"])
+        for h, frac in rows:
+            writer.writerow([h, f"{frac:.6f}"])
+
+    def percentile(p: float) -> int:
+        idx = min(n - 1, max(0, int(p * n)))
+        return samples[idx]
+
+    stats = {
+        "hop_p50": percentile(0.50),
+        "hop_p90": percentile(0.90),
+        "hop_p99": percentile(0.99),
+        "hop_max": samples[-1],
+    }
+
+    print(f"\n===== Hop-count CDF ({n} samples) =====")
+    print(f"  p50={stats['hop_p50']}  p90={stats['hop_p90']}  "
+          f"p99={stats['hop_p99']}  max={stats['hop_max']}")
+    print(f"  Wrote -> {path}")
+
+    return stats
+
+
+def write_per_block_log(results_dir: str, out_name: str) -> None:
+    """
+    Writes `per_block_log` (one row per block: rounds/messages/coverage of
+    that block's final-propagation broadcast) so the block-by-block
+    evolution can be plotted — e.g. Plumtree's tree converging over the run.
+    No-op if per_block_log is empty (not populated outside the
+    leader-metronome coordinator).
+    """
+    if not per_block_log:
+        return
+    path = Path(results_dir) / out_name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["block", "rounds", "messages", "coverage"])
+        for bc, rounds, msgs, coverage in per_block_log:
+            writer.writerow([bc, rounds, msgs, f"{coverage:.6f}"])
+    print(f"  Per-block log -> {path}")
+
+
 # ============================================================
 # Graph generation
 # ============================================================
@@ -1207,6 +1351,7 @@ def main():
     p.add_argument("--plumtree_lazy_fanout", type=int, default=2)
     p.add_argument("--gossipsub_mesh_degree", type=int, default=8)
     p.add_argument("--gossipsub_ihave_fanout", type=int, default=4)
+    p.add_argument("--hop_ttl", type=int, default=64)
     p.add_argument("--overlap_broadcast", action="store_true")
     p.add_argument("--msg_proc_ms", type=float, default=1.0)
     p.add_argument("--print", dest="print_int", type=int, default=144)
@@ -1226,6 +1371,12 @@ def main():
     p.add_argument("--quiet_blocks", action="store_true")
     p.add_argument("--results_csv", type=str, default="")
     p.add_argument("--results_dir", type=str, default="Results")
+    p.add_argument("--hop_cdf_csv", type=str, default="hop_cdf.csv",
+                   help="Filename (within --results_dir) for the per-run hop-count CDF. "
+                        "Give parallel runs distinct names to avoid clobbering each other.")
+    p.add_argument("--per_block_csv", type=str, default="",
+                   help="Filename (within --results_dir) for a per-block rounds/messages/"
+                        "coverage log of the final-propagation broadcast. Empty = disabled.")
 
     args = p.parse_args()
 
@@ -1284,7 +1435,7 @@ def main():
 
     # Globals setup
     global LINK_RTT_MS, LINK_JITTER_MS, LINK_MSG_PROC_MS, CTRL_BW_MBPS, GOSSIP_FANOUT, KADEMLIA_BUCKET_BITS
-    global PLUMTREE_LAZY_FANOUT, GOSSIPSUB_MESH_DEGREE, GOSSIPSUB_IHAVE_FANOUT
+    global PLUMTREE_LAZY_FANOUT, GOSSIPSUB_MESH_DEGREE, GOSSIPSUB_IHAVE_FANOUT, HOP_TTL
     LINK_RTT_MS      = float(args.rtt_ms or 0.0)
     LINK_JITTER_MS   = float(args.jitter_ms or 0.0)
     LINK_MSG_PROC_MS = float(args.msg_proc_ms or 0.0)
@@ -1294,6 +1445,7 @@ def main():
     PLUMTREE_LAZY_FANOUT = int(args.plumtree_lazy_fanout or 2)
     GOSSIPSUB_MESH_DEGREE = int(args.gossipsub_mesh_degree or 8)
     GOSSIPSUB_IHAVE_FANOUT = int(args.gossipsub_ihave_fanout or 4)
+    HOP_TTL          = int(args.hop_ttl or 64)
 
     global POOL_MODE, pool_count, pool_deque
     POOL_MODE  = str(args.pool_mode or "count")
@@ -1377,6 +1529,10 @@ def main():
 
     env.run(until=coord_proc)
 
+    hop_stats = write_hop_cdf(str(args.results_dir or "Results"), str(args.hop_cdf_csv or "hop_cdf.csv"))
+    if args.per_block_csv:
+        write_per_block_log(str(args.results_dir or "Results"), str(args.per_block_csv))
+
     # Results
     global sim_summary
     if sim_summary:
@@ -1434,6 +1590,7 @@ def main():
         "shards", "average block time", "block size", "messages", "mode", "tps",
         "no. of blocks generated", "blocktime in configuration file", "sig_scheme",
         "broadcast_protocol", "shard_comm_protocol",
+        "broadcast_cpu_seconds", "hop_p50", "hop_p90", "hop_p99", "hop_max",
     ]
 
     def upsert_paper_csv_row(results_path: str, row: dict):
@@ -1530,6 +1687,11 @@ def main():
         "sig_scheme":                        str(args.sig_scheme or ""),
         "broadcast_protocol":                str(args.broadcast_protocol or "") if protocol_relevant else "n/a",
         "shard_comm_protocol":               str(args.shard_comm_protocol or "") if protocol_relevant else "n/a",
+        "broadcast_cpu_seconds":             float(sim_summary.get("broadcast_cpu_seconds", 0.0)) if sim_summary else 0.0,
+        "hop_p50":                           hop_stats["hop_p50"] if hop_stats else "",
+        "hop_p90":                           hop_stats["hop_p90"] if hop_stats else "",
+        "hop_p99":                           hop_stats["hop_p99"] if hop_stats else "",
+        "hop_max":                           hop_stats["hop_max"] if hop_stats else "",
     }
 
     print("\n===== PAPER CSV Row =====")

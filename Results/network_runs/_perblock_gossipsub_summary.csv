@@ -1,0 +1,2 @@
+currency,nodes,wallets,miners,transactions,interval,shards,average block time,block size,messages,mode,tps,no. of blocks generated,blocktime in configuration file,sig_scheme,broadcast_protocol,shard_comm_protocol,broadcast_cpu_seconds,hop_p50,hop_p90,hop_p99,hop_max
+memo,1024,65536000,1024,65536000,0.01,16,16.318675255814927,65536,3108852,sharded,3862.963078301172,300,18.75,ed25519,gossipsub,kademlia,307.1987999999999,3,4,4,5
