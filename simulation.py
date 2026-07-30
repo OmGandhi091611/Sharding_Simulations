@@ -164,7 +164,17 @@ def recv_processing_s() -> float:
     return LINK_MSG_PROC_MS / 1000.0 if LINK_MSG_PROC_MS > 0 else 0.0
 
 
-def control_phase_delay(num_msgs: int, msg_size_bytes: int) -> float:
+def control_phase_delay(num_msgs: int, msg_size_bytes: int, charge_recv_cpu: bool = True) -> float:
+    """
+    `charge_recv_cpu` should be True for many-to-one phases (e.g. the
+    leader receiving `num_msgs` reports) — the leader has one CPU, so
+    processing them really does serialize on its critical path. It should
+    be False for one-to-many phases (e.g. the leader announcing to
+    `num_msgs` peers) — each peer processes its own copy on its own CPU
+    concurrently, so charging N receivers' processing time onto the
+    sender's timeline would double-count it, the same reasoning
+    gossip_broadcast_delay() already applies to gossip's fan-out.
+    """
     if num_msgs <= 0:
         return 0.0
     if CTRL_BW_MBPS and CTRL_BW_MBPS > 0:
@@ -172,7 +182,7 @@ def control_phase_delay(num_msgs: int, msg_size_bytes: int) -> float:
         send_time = (num_msgs * msg_size_bytes) / max(Bps, 1e-9)
     else:
         send_time = 0.0
-    cpu_time = num_msgs * recv_processing_s()
+    cpu_time = num_msgs * recv_processing_s() if charge_recv_cpu else 0.0
     latency = sample_one_way_latency_s()
     return send_time + cpu_time + latency
 
@@ -894,7 +904,7 @@ def leader_announce_phase(N: int, msg_size: int):
     if N <= 0:
         return 0.0, 0
     msgs = N
-    dt = control_phase_delay(msgs, msg_size)
+    dt = control_phase_delay(msgs, msg_size, charge_recv_cpu=False)
     return dt, msgs
 
 
