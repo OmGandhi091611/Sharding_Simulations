@@ -55,6 +55,7 @@ RUNS_DIR     = os.path.join(RESULTS_DIR, "network_runs")
 HOPCDF_DIR   = os.path.join(RUNS_DIR, "hopcdf")
 THROWAWAY_HOPCDF = "_throwaway_hopcdf.csv"
 MERGE_BIN    = str(ROOT / "merge_results")
+AGGREGATE_BIN = str(ROOT / "aggregate_results")
 
 NETWORK_ENV  = os.environ.get("NETWORK_ENV", "custom")
 
@@ -69,9 +70,22 @@ SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
 SIG_SCHEMES = ["ed25519"]
 
-BROADCAST_PROTOCOLS = ["gossip", "plumtree", "gossipsub"]
+# Full multi-protocol comparison — kept here (unused) for the future
+# protocol-comparison paper. This paper's main sweep fixes both axes to
+# the fastest protocol found (see BROADCAST_PROTOCOLS / SHARD_COMM_PROTOCOLS
+# below) and instead sweeps --seed for statistical repeats.
+BROADCAST_PROTOCOLS_FULL   = ["gossip", "plumtree", "gossipsub"]
+SHARD_COMM_PROTOCOLS_FULL  = ["kademlia", "direct"]
 
-SHARD_COMM_PROTOCOLS = ["kademlia"]
+BROADCAST_PROTOCOLS = ["gossip"]
+
+SHARD_COMM_PROTOCOLS = ["direct"]
+
+# Number of repeat runs (distinct --seed values) per grid config, for
+# computing mean/std/95% CI in the aggregation step. Tune by running
+# network_convergence_check.py and picking the N where CI width stops
+# shrinking meaningfully; hard-code the result here.
+REPEATS = 10
 
 BLOCK_SIZES = [
     1024, 2048, 4096, 8192, 16384, 32768,
@@ -108,9 +122,9 @@ TOTAL_MINERS    = 1024
 # ------------------------------------------------------------------ #
 def build_grid() -> List[Dict[str, Any]]:
     combos = []
-    for shards, blocksize, blocktime, sig, bprot, scomm in itertools.product(
+    for shards, blocksize, blocktime, sig, bprot, scomm, seed in itertools.product(
             SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES, SIG_SCHEMES,
-            BROADCAST_PROTOCOLS, SHARD_COMM_PROTOCOLS):
+            BROADCAST_PROTOCOLS, SHARD_COMM_PROTOCOLS, range(REPEATS)):
 
         nodes        = TOTAL_NODES
         miners       = TOTAL_MINERS
@@ -119,13 +133,17 @@ def build_grid() -> List[Dict[str, Any]]:
         wallets      = transactions
 
         name = (f"net_s{shards}_bs{blocksize}_bt{blocktime:.5f}_"
-                f"{bprot}_{scomm}_{sig}").replace(".", "p")
+                f"{bprot}_{scomm}_{sig}_seed{seed}").replace(".", "p")
 
+        # Only seed 0 keeps the reference config's real hop-count CDF —
+        # every other repeat of that same config would otherwise race to
+        # write/clobber the same file, so it's pointed at the throwaway.
         is_reference = (
             shards == REFERENCE_HOPCDF_SHARDS
             and blocksize == REFERENCE_HOPCDF_BLOCKSIZE
             and blocktime == REFERENCE_HOPCDF_BLOCKTIME
             and scomm == SHARD_COMM_PROTOCOLS[0]
+            and seed == 0
         )
 
         combos.append({
@@ -141,6 +159,7 @@ def build_grid() -> List[Dict[str, Any]]:
             "sig_scheme":           sig,
             "broadcast_protocol":   bprot,
             "shard_comm_protocol":  scomm,
+            "seed":                 seed,
             "is_reference":         is_reference,
         })
     return combos
@@ -177,6 +196,7 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--sig_scheme",      combo["sig_scheme"]]
     cmd += ["--broadcast_protocol",  combo["broadcast_protocol"]]
     cmd += ["--shard_comm_protocol", combo["shard_comm_protocol"]]
+    cmd += ["--seed",            str(combo["seed"])]
 
     cmd += ["--quiet_blocks"]
 
@@ -291,11 +311,45 @@ def merge_run_csvs(runs_dir: str, network_env: str):
 
 
 # ------------------------------------------------------------------ #
+# Aggregate — collapses the merged per-(config,seed) CSV into one row per
+# config (mean/std/95% CI across REPEATS seeds), via the compiled C tool.
+# ------------------------------------------------------------------ #
+def aggregate_merged_csv(results_dir: str, network_env: str):
+    merged_csv = os.path.join(results_dir, f"network_results_{network_env}.csv")
+    agg_csv    = os.path.join(results_dir, f"network_results_{network_env}_agg.csv")
+
+    if not os.path.exists(merged_csv):
+        print("[aggregate] No merged CSV found - skipping.")
+        return
+
+    if not os.path.exists(AGGREGATE_BIN):
+        raise SystemExit(
+            f"[aggregate] '{AGGREGATE_BIN}' not found. Compile it first:\n"
+            f"  gcc -O2 aggregate_results.c -o aggregate_results -lm"
+        )
+
+    cmd = [AGGREGATE_BIN, merged_csv, agg_csv]
+    print(f"[aggregate] Aggregating {merged_csv} -> {agg_csv}")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        raise SystemExit(f"[aggregate] aggregate_results exited with code {result.returncode}")
+
+    print(f"[aggregate] Done -> {agg_csv}")
+
+
+# ------------------------------------------------------------------ #
 # Skip-completed filter (same dedup key shape as memo_parallel.py, plus
 # neighbors/shard-comm are already covered by broadcast/shard_comm fields)
 # ------------------------------------------------------------------ #
 def _row_key(row: dict) -> tuple:
+    # Includes shard count / block size / block time / seed on top of the
+    # original fields — those four alone risked false-duplicate collisions
+    # (e.g. two different grid points that happen to land on the same tps).
     return (
+        row.get("shards", "").strip(),
+        row.get("block size", "").strip(),
+        row.get("blocktime in configuration file", "").strip(),
+        row.get("seed", "").strip(),
         row.get("tps", "").strip(),
         row.get("average block time", "").strip(),
         row.get("broadcast_protocol", "").strip(),
@@ -354,6 +408,12 @@ def main():
             f"  gcc -O2 -fopenmp merge_results.c -o merge_results"
         )
 
+    if not os.path.exists(AGGREGATE_BIN):
+        raise SystemExit(
+            f"'{AGGREGATE_BIN}' not found. Compile it first:\n"
+            f"  gcc -O2 aggregate_results.c -o aggregate_results -lm"
+        )
+
     combos = build_grid()
     total  = len(combos)
 
@@ -370,6 +430,7 @@ def main():
     print(f"  Neighbors   : {TOTAL_NEIGHBORS}")
     print(f"  Block sizes : {BLOCK_SIZES}")
     print(f"  Block times : {BLOCK_TIMES}")
+    print(f"  Repeats     : {REPEATS} seeds/config (0..{REPEATS - 1})")
     print(f"  Sig scheme  : {SIG_SCHEMES} (fixed)")
     print(f"  Broadcast   : {BROADCAST_PROTOCOLS}")
     print(f"  Shard comm  : {SHARD_COMM_PROTOCOLS}")
@@ -402,7 +463,9 @@ def main():
 
     print()
     merge_run_csvs(RUNS_DIR, NETWORK_ENV)
-    print(f"\nDone. Results -> Results/network_results_{NETWORK_ENV}.csv")
+    aggregate_merged_csv(RESULTS_DIR, NETWORK_ENV)
+    print(f"\nDone. Results   -> Results/network_results_{NETWORK_ENV}.csv")
+    print(f"Aggregated       -> Results/network_results_{NETWORK_ENV}_agg.csv")
     print(f"Hop-count CDF references -> {HOPCDF_DIR}/<broadcast_protocol>_{SHARD_COMM_PROTOCOLS[0]}.csv")
 
 

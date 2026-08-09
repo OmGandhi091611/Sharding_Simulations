@@ -1305,9 +1305,7 @@ def write_per_block_log(results_dir: str, out_name: str) -> None:
 # ============================================================
 # Graph generation
 # ============================================================
-def build_random_k_out_graph(nodes: List[Node], k: int, seed: Optional[int] = None):
-    if seed is not None:
-        random.seed(seed)
+def build_random_k_out_graph(nodes: List[Node], k: int):
     n = len(nodes)
     if n <= 1 or k <= 0:
         for u in nodes:
@@ -1378,6 +1376,11 @@ def main():
                    choices=["leader", "shard", "leader_par"])
     p.add_argument("--pool_mode", type=str, default="count",
                    choices=["count", "deque"])
+    p.add_argument("--seed", type=int, default=None,
+                   help="Single source of truth for this run's randomness. "
+                        "Seeds the global random module before any random draw "
+                        "(graph generation, mining, gossip, etc). Unset = "
+                        "OS-entropy seeded (non-reproducible).")
     p.add_argument("--quiet_blocks", action="store_true")
     p.add_argument("--results_csv", type=str, default="")
     p.add_argument("--results_dir", type=str, default="Results")
@@ -1413,6 +1416,11 @@ def main():
         if hasattr(args, k) and k not in cli_provided:
             setattr(args, k, v)
     # ------------------------------------------------------------------
+
+    # Single source of truth for this run's randomness — must run before
+    # build_random_k_out_graph or any other random draw. random.seed(None)
+    # falls back to OS entropy, matching prior unseeded behavior.
+    random.seed(args.seed)
 
     # Default gossip fanout to half the neighbor count, unless explicitly
     # set via CLI or config — a small fanout relative to neighbors is what
@@ -1479,7 +1487,7 @@ def main():
 
     # Nodes + graph
     nodes = [Node(env, i) for i in range(args.nodes or 0)]
-    build_random_k_out_graph(nodes, int(args.neighbors or 0), seed=None)
+    build_random_k_out_graph(nodes, int(args.neighbors or 0))
 
     # Miners
     miners = [Miner(i, args.hashrate or 0.0) for i in range(args.miners or 0)]
@@ -1599,7 +1607,7 @@ def main():
         "currency", "nodes", "wallets", "miners", "transactions", "interval",
         "shards", "average block time", "block size", "messages", "mode", "tps",
         "no. of blocks generated", "blocktime in configuration file", "sig_scheme",
-        "broadcast_protocol", "shard_comm_protocol",
+        "broadcast_protocol", "shard_comm_protocol", "seed",
         "broadcast_cpu_seconds", "hop_p50", "hop_p90", "hop_p99", "hop_max",
     ]
 
@@ -1609,7 +1617,7 @@ def main():
 
         key_fields = ["currency", "shards", "block size", "mode",
                       "blocktime in configuration file", "sig_scheme",
-                      "broadcast_protocol", "shard_comm_protocol"]
+                      "broadcast_protocol", "shard_comm_protocol", "seed"]
 
         def row_key(r: dict):
             return tuple(str(r.get(k, "")) for k in key_fields)
@@ -1697,6 +1705,7 @@ def main():
         "sig_scheme":                        str(args.sig_scheme or ""),
         "broadcast_protocol":                str(args.broadcast_protocol or "") if protocol_relevant else "n/a",
         "shard_comm_protocol":               str(args.shard_comm_protocol or "") if protocol_relevant else "n/a",
+        "seed":                              int(args.seed) if args.seed is not None else "",
         "broadcast_cpu_seconds":             float(sim_summary.get("broadcast_cpu_seconds", 0.0)) if sim_summary else 0.0,
         "hop_p50":                           hop_stats["hop_p50"] if hop_stats else "",
         "hop_p90":                           hop_stats["hop_p90"] if hop_stats else "",
