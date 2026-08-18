@@ -1,8 +1,8 @@
 {
   "currency": "memo",
-  "nodes": 1024,
-  "neighbors": 512,
-  "miners": 1024,
+  "nodes": 1000,
+  "neighbors": 100,
+  "miners": 1000,
   "hashrate": 1000000,
   "wallets": 10240,
   "transactions": 10240,
@@ -24,6 +24,6 @@
   "verify_mode": "shard",
   "broadcast_protocol": "gossip",
   "shard_comm_protocol": "kademlia",
-  "gossip_fanout": 10,
+  "gossip_fanout": 100,
   "kademlia_bucket_bits": 1
 }

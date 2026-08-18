@@ -33,9 +33,10 @@
  * "seed" and the per-run metrics being aggregated. Must match
  * simulation.py's PAPER_CSV_HEADER field names exactly. */
 static const char *GROUP_FIELDS[] = {
-    "currency", "nodes", "wallets", "miners", "transactions", "interval",
+    "currency", "nodes", "neighbors", "wallets", "miners", "transactions", "interval",
     "shards", "block size", "mode", "blocktime in configuration file",
-    "sig_scheme", "broadcast_protocol", "shard_comm_protocol",
+    "sig_scheme", "broadcast_protocol", "shard_comm_protocol", "verify_mode",
+    "conflict_check",
 };
 #define NUM_GROUP_FIELDS ((int)(sizeof(GROUP_FIELDS) / sizeof(GROUP_FIELDS[0])))
 

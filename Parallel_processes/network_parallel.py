@@ -8,14 +8,22 @@ answers "which protocol is fastest", not "which architecture is fastest".
 Signature scheme is fixed to ed25519 so the grid stays about protocol/network
 behavior, not signature cost.
 
-Network condition (local / US WAN / global WAN) is NOT swept here — like
-memo_parallel.py, that's controlled by rtt_ms/control_bw_mbps in
-memo_config/base.json, edited by hand between runs. Set NETWORK_ENV to label
-the output file for whichever condition base.json currently represents:
+Network condition (local / US WAN / global WAN) is NOT swept here — it's
+selected once per invocation via NETWORK_ENV, which both labels the output
+file AND overrides rtt_ms/control_bw_mbps on the simulation.py command line
+(see NETWORK_ENV_PARAMS below), so memo_config/base.json no longer needs to
+be hand-edited between runs. RTT figures are sourced from real measurements
+(AWS us-east-1<->us-west-1/2 cross-country latency, AWS us-east-1<->Sydney/
+Tokyo intercontinental latency, and datacenter ToR-switch RTT studies — see
+README.md's Network Condition Variants section for citations); the bandwidth
+figures are engineering assumptions, not independently sourced:
 
     NETWORK_ENV=local  python Parallel_processes/network_parallel.py
     NETWORK_ENV=usa    python Parallel_processes/network_parallel.py
     NETWORK_ENV=global python Parallel_processes/network_parallel.py
+
+NETWORK_ENV=custom (the default) skips the override entirely and falls back
+to whatever rtt_ms/control_bw_mbps is currently in memo_config/base.json.
 
 Merging always goes through the compiled C merger (./merge_results) — there
 is no Python fallback here, unlike memo_parallel.py, since correctness of
@@ -59,12 +67,21 @@ AGGREGATE_BIN = str(ROOT / "aggregate_results")
 
 NETWORK_ENV  = os.environ.get("NETWORK_ENV", "custom")
 
+# rtt_ms sourced from real measurements (see README.md Network Condition
+# Variants section for citations); control_bw_mbps is an engineering
+# assumption, not independently sourced.
+NETWORK_ENV_PARAMS = {
+    "local":  {"rtt_ms": 0.3, "control_bw_mbps": 10000},
+    "usa":    {"rtt_ms": 60,  "control_bw_mbps": 1000},
+    "global": {"rtt_ms": 180, "control_bw_mbps": 50},
+}
+
 # ------------------------------------------------------------------ #
 # GRID — edit these lists to define the parameter space.
 # Full protocol sweep multiplies the grid size by
-# len(BROADCAST_PROTOCOLS) * len(SHARD_COMM_PROTOCOLS) versus memo_parallel's
-# single fixed combo — trim SHARD_COUNTS/BLOCK_SIZES/BLOCK_TIMES if this is
-# too large for one run.
+# len(BROADCAST_PROTOCOLS) * len(SHARD_COMM_PROTOCOLS) * len(CONFLICT_CHECK_METHODS)
+# versus memo_parallel's single fixed combo — trim SHARD_COUNTS/BLOCK_SIZES/
+# BLOCK_TIMES if this is too large for one run.
 # ------------------------------------------------------------------ #
 SHARD_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
@@ -81,11 +98,24 @@ BROADCAST_PROTOCOLS = ["gossip"]
 
 SHARD_COMM_PROTOCOLS = ["direct"]
 
+# Conflict-check technique compared head-to-head: all 5 real measured
+# techniques (see conflict_check_benchmark_c.csv) — hash_set, nonce_hash_set,
+# sort_scan, nonce_sort_scan, radix_sort — each charged per block based on
+# its transaction count. Swept (not fixed) so each technique's effect on
+# TPS can be compared directly.
+CONFLICT_CHECK_METHODS = ["nonce_hash_set"]
+                        #   , "radix_sort"]
+
+# verify_mode is not swept here — "shard" mode always does shard-local
+# double-spend check followed by the leader's cross-shard pass (see
+# simulation.py's coord_leader_metronome), there's no shard-only variant to
+# compare against. Set via memo_config/base.json ("verify_mode": "shard").
+
 # Number of repeat runs (distinct --seed values) per grid config, for
 # computing mean/std/95% CI in the aggregation step. Tune by running
 # network_convergence_check.py and picking the N where CI width stops
 # shrinking meaningfully; hard-code the result here.
-REPEATS = 10
+REPEATS = 5
 
 BLOCK_SIZES = [
     1024, 2048, 4096, 8192, 16384, 32768,
@@ -112,9 +142,9 @@ MAX_WORKERS = int(os.environ.get(
     max(1, multiprocessing.cpu_count() - 2)
 ))
 
-TOTAL_NODES     = 1024
-TOTAL_NEIGHBORS = 512
-TOTAL_MINERS    = 1024
+TOTAL_NODES     = 1000
+TOTAL_NEIGHBORS = 100
+TOTAL_MINERS    = 1000
 
 
 # ------------------------------------------------------------------ #
@@ -122,9 +152,10 @@ TOTAL_MINERS    = 1024
 # ------------------------------------------------------------------ #
 def build_grid() -> List[Dict[str, Any]]:
     combos = []
-    for shards, blocksize, blocktime, sig, bprot, scomm, seed in itertools.product(
+    for shards, blocksize, blocktime, sig, bprot, scomm, ccmethod, seed in itertools.product(
             SHARD_COUNTS, BLOCK_SIZES, BLOCK_TIMES, SIG_SCHEMES,
-            BROADCAST_PROTOCOLS, SHARD_COMM_PROTOCOLS, range(REPEATS)):
+            BROADCAST_PROTOCOLS, SHARD_COMM_PROTOCOLS, CONFLICT_CHECK_METHODS,
+            range(REPEATS)):
 
         nodes        = TOTAL_NODES
         miners       = TOTAL_MINERS
@@ -133,16 +164,20 @@ def build_grid() -> List[Dict[str, Any]]:
         wallets      = transactions
 
         name = (f"net_s{shards}_bs{blocksize}_bt{blocktime:.5f}_"
-                f"{bprot}_{scomm}_{sig}_seed{seed}").replace(".", "p")
+                f"{bprot}_{scomm}_{ccmethod}_{sig}_seed{seed}").replace(".", "p")
 
-        # Only seed 0 keeps the reference config's real hop-count CDF —
-        # every other repeat of that same config would otherwise race to
-        # write/clobber the same file, so it's pointed at the throwaway.
+        # Only seed 0, hash_set (the first entry of each swept axis) keeps
+        # the reference config's real hop-count CDF — hop count is a
+        # broadcast-layer property unaffected by conflict-check technique,
+        # so every other combo hitting this same config would otherwise race
+        # to write/clobber the same file; they're pointed at the throwaway
+        # instead.
         is_reference = (
             shards == REFERENCE_HOPCDF_SHARDS
             and blocksize == REFERENCE_HOPCDF_BLOCKSIZE
             and blocktime == REFERENCE_HOPCDF_BLOCKTIME
             and scomm == SHARD_COMM_PROTOCOLS[0]
+            and ccmethod == CONFLICT_CHECK_METHODS[0]
             and seed == 0
         )
 
@@ -159,6 +194,7 @@ def build_grid() -> List[Dict[str, Any]]:
             "sig_scheme":           sig,
             "broadcast_protocol":   bprot,
             "shard_comm_protocol":  scomm,
+            "conflict_check_method": ccmethod,
             "seed":                 seed,
             "is_reference":         is_reference,
         })
@@ -175,6 +211,11 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
 
     if os.path.exists(BASE_CONFIG):
         cmd += ["--config", BASE_CONFIG]
+
+    env_params = NETWORK_ENV_PARAMS.get(NETWORK_ENV)
+    if env_params:
+        cmd += ["--rtt_ms", str(env_params["rtt_ms"])]
+        cmd += ["--control_bw_mbps", str(env_params["control_bw_mbps"])]
 
     cmd += ["--results_csv", f"{name}.csv", "--results_dir", RUNS_DIR]
 
@@ -197,6 +238,8 @@ def launch_sim(combo: Dict[str, Any]) -> subprocess.Popen:
     cmd += ["--broadcast_protocol",  combo["broadcast_protocol"]]
     cmd += ["--shard_comm_protocol", combo["shard_comm_protocol"]]
     cmd += ["--seed",            str(combo["seed"])]
+
+    cmd += ["--conflict_check_method", combo["conflict_check_method"]]
 
     cmd += ["--quiet_blocks"]
 
@@ -354,6 +397,8 @@ def _row_key(row: dict) -> tuple:
         row.get("average block time", "").strip(),
         row.get("broadcast_protocol", "").strip(),
         row.get("shard_comm_protocol", "").strip(),
+        row.get("verify_mode", "").strip(),
+        row.get("conflict_check", "").strip(),
     )
 
 
@@ -423,8 +468,15 @@ def main():
         skipped = total - len(combos)
         print(f"[skip-check] {skipped} fresh/already-merged runs skipped, {len(combos)} remaining\n")
 
+    env_params = NETWORK_ENV_PARAMS.get(NETWORK_ENV)
+    env_desc = (
+        f"rtt_ms={env_params['rtt_ms']}, control_bw_mbps={env_params['control_bw_mbps']} (overridden on CLI)"
+        if env_params else "not overridden — using memo_config/base.json as-is"
+    )
+
     print("Network protocol comparison — parallel grid runner")
     print(f"  Network env : {NETWORK_ENV}  (set NETWORK_ENV=local|usa|global to label output)")
+    print(f"  Net params  : {env_desc}")
     print(f"  Shards      : {SHARD_COUNTS}")
     print(f"  Nodes/Miners: {TOTAL_NODES} / {TOTAL_MINERS} (fixed across all shard counts)")
     print(f"  Neighbors   : {TOTAL_NEIGHBORS}")
@@ -432,6 +484,7 @@ def main():
     print(f"  Block times : {BLOCK_TIMES}")
     print(f"  Repeats     : {REPEATS} seeds/config (0..{REPEATS - 1})")
     print(f"  Sig scheme  : {SIG_SCHEMES} (fixed)")
+    print(f"  Conflict chk: {CONFLICT_CHECK_METHODS} (swept)")
     print(f"  Broadcast   : {BROADCAST_PROTOCOLS}")
     print(f"  Shard comm  : {SHARD_COMM_PROTOCOLS}")
     print(f"  Total runs  : {total}")

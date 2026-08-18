@@ -534,7 +534,31 @@ routes, the harsher end of "global" rather than just transatlantic) and only 50 
 of control-plane bandwidth, reflecting typical realistic uplink capacity for a single
 globally-distributed peer.
 
-Edit `memo_config/base.json` before each sweep:
+**RTT sourcing:** the RTT figures above are grounded in real measurements, not
+guesses. Local (~0.3ms) is bounded below by measured datacenter/top-of-rack
+switch RTT (~5-200µs; see the PL2 rack-scale-networking paper,
+[arXiv:2101.06537](https://arxiv.org/pdf/2101.06537)). US WAN (~60ms) matches
+measured AWS `us-east-1↔us-west-1/us-west-2` round-trip latency (~65-70ms; see
+[cloudping.co](https://www.cloudping.co/) and
+[economize.cloud's AWS latency matrix](https://www.economize.cloud/resources/aws/latency/)).
+Global WAN (~180ms) sits within the measured range for AWS US↔Sydney/Tokyo
+intercontinental routes (~150-260ms across the same two sources).
+
+**Bandwidth is an assumption, not independently sourced.** Unlike the RTT
+figures, `control_bw_mbps` for each condition (10,000 / 1,000 / 50 Mbps) is an
+engineering estimate of plausible control-plane capacity per condition, not a
+value backed by a specific published measurement — treat it as a modeling
+choice when interpreting or citing results.
+
+For the network/broadcast-protocol sweep (`Parallel_processes/network_parallel.py`,
+which produces `network_results_<env>.csv` and the `memo_results_<env>.csv`
+aggregates derived from it), these three conditions are applied automatically
+per run via `NETWORK_ENV` — see [Network Protocol Comparison](#network-protocol-comparison)
+below; `memo_config/base.json` no longer needs to be hand-edited for that sweep.
+
+For the MEMO signature-scheme sweep (`Parallel_processes/memo_parallel.py`),
+network condition is still set manually by editing `memo_config/base.json`
+before each run:
 
 ```json
 { "rtt_ms": 0.3, "control_bw_mbps": 10000 }  // Local
@@ -714,7 +738,7 @@ A separate sweep, independent of the Chain 1/2/3 architecture comparison above, 
 
 ### What the sweep covers
 
-`Parallel_processes/network_parallel.py` sweeps `broadcast_protocol` (`gossip`, `flood`, `plumtree`, `gossipsub`) × `shard_comm_protocol` (`kademlia`) across the same shard-count/block-size/block-time grid used elsewhere, at a fixed topology of 1 024 nodes / 512 neighbors per node. Network condition (local/US WAN/global WAN) is controlled the same way as the MEMO sweep — by editing `rtt_ms`/`control_bw_mbps` in `memo_config/base.json` before each run.
+`Parallel_processes/network_parallel.py` sweeps `broadcast_protocol` (`gossip`, `flood`, `plumtree`, `gossipsub`) × `shard_comm_protocol` (`kademlia`) across the same shard-count/block-size/block-time grid used elsewhere, at a fixed topology of 1 024 nodes / 512 neighbors per node. Network condition (local/US WAN/global WAN) is selected via `NETWORK_ENV`, which automatically overrides `--rtt_ms`/`--control_bw_mbps` on each `simulation.py` invocation with the values from the [Network Condition Variants](#network-condition-variants) table above — no manual `memo_config/base.json` editing needed for this sweep. `NETWORK_ENV=custom` (the default) skips the override and falls back to whatever `memo_config/base.json` currently has.
 
 A small reference subset of the grid also keeps its full hop-count distribution (not just aggregate stats), written to `Results/network_runs/hopcdf/<broadcast_protocol>_<shard_comm_protocol>.csv` — this is the data behind the "Plumtree needs more hops" finding referenced in [Broadcast Protocol Animation](#broadcast-protocol-animation) below.
 

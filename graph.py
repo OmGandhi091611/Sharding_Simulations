@@ -928,7 +928,8 @@ def run_common_blocktime_vs_shards(
 
         c_shards = _pick_col(df, ["shards"])
         c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
-        c_abt    = _pick_col(df, ["average block time", "avg block time", "avg_block_time"])
+        c_abt    = _pick_col(df, ["average block time_mean", "average block time",
+                                   "avg block time", "avg_block_time"])
 
         if any(c is None for c in [c_shards, c_bs, c_abt]):
             print(f"[skip] {label}: missing required columns in {csv_path}")
@@ -988,6 +989,112 @@ def run_common_blocktime_vs_shards(
     ax.set_xticks(xticks)
     ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
     ax.set_yscale("log")
+    ax.legend(title="Network Environment", fontsize=10, title_fontsize=10)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ----------------------------
+# 5b) Common: Average TPS vs Shards across all 3 network environments
+#     Three lines (datacenter, US WAN, global WAN) on one graph.
+#     Optional --common_tps_blocksize to filter to a single block size.
+# ----------------------------
+def run_common_tps_vs_shards(
+    local_csv: str,
+    usa_csv: str,
+    global_csv: str,
+    outdir: str,
+    show: bool,
+    block_size: int = None,
+):
+    configs = [
+        ("Datacenter",  local_csv,  "#1f77b4"),
+        ("US WAN",      usa_csv,    "#ff7f0e"),
+        ("Global WAN",  global_csv, "#2ca02c"),
+    ]
+
+    missing_files = [label for label, path, _ in configs if not os.path.exists(path)]
+    if missing_files:
+        print(f"[skip] common tps graph: missing CSVs for {missing_files}")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    all_shards = None
+
+    for label, csv_path, color in configs:
+        df = pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
+        df.columns = [str(c).strip() for c in df.columns]
+
+        c_shards = _pick_col(df, ["shards"])
+        c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
+        c_tps    = _pick_col(df, ["tps_mean", "tps"])
+
+        if any(c is None for c in [c_shards, c_bs, c_tps]):
+            print(f"[skip] {label}: missing required columns in {csv_path}")
+            continue
+
+        for c in [c_shards, c_bs, c_tps]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=[c_shards, c_bs, c_tps]).copy()
+
+        df["shards_int"]     = df[c_shards].astype(int)
+        df["block_size_int"] = df[c_bs].astype(int)
+        df["tps_val"]        = df[c_tps].astype(float)
+
+        if block_size is not None:
+            available = sorted(df["block_size_int"].unique().tolist())
+            if block_size not in available:
+                print(f"[skip] {label}: block size {block_size} not found. Available: {available}")
+                continue
+            df = df[df["block_size_int"] == block_size].copy()
+
+        agg = (
+            df.groupby("shards_int")["tps_val"]
+            .mean()
+            .reset_index()
+            .sort_values("shards_int")
+        )
+
+        if all_shards is None:
+            all_shards = sorted(agg["shards_int"].unique().tolist())
+
+        x_positions = {s: i * 2 for i, s in enumerate(
+            sorted(agg["shards_int"].unique().tolist())
+        )}
+        x_vals = [x_positions[s] for s in agg["shards_int"]]
+
+        ax.plot(x_vals, agg["tps_val"], marker="o", linewidth=2,
+                markersize=5, label=label, color=color)
+
+    if all_shards is None:
+        print("[skip] common tps graph: no data plotted")
+        plt.close(fig)
+        return
+
+    x_positions_global = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks = [x_positions_global[s] for s in all_shards]
+
+    title_suffix = f" (Block Size = {block_size:,})" if block_size is not None else " (All Block Sizes — Mean)"
+    out_name = (
+        f"common_tps_vs_shards_bs{block_size}.png"
+        if block_size is not None
+        else "common_tps_vs_shards.png"
+    )
+
+    ax.set_xlabel("Number of Shards", fontsize=13)
+    ax.set_ylabel("Average TPS", fontsize=13)
+    ax.set_title(f"Average TPS vs Number of Shards{title_suffix}", fontsize=14)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
     ax.legend(title="Network Environment", fontsize=10, title_fontsize=10)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
@@ -1149,6 +1256,8 @@ def main():
     ap.add_argument("--memo_local_csv", default="memo_results_local.csv")
     ap.add_argument("--memo_usa_csv",   default="memo_results_usa.csv")
     ap.add_argument("--memo_global_csv", default="memo_results_global.csv")
+    ap.add_argument("--common_tps_blocksize", type=int, default=None,
+                    help="If set, filter common tps-vs-shards plot to this block size")
     ap.add_argument("--common_bt_blocksize", type=int, default=None,
                     help="If set, filter common blocktime-vs-shards graph to this block size")
     ap.add_argument("--skip_common", action="store_true",
@@ -1206,6 +1315,12 @@ def main():
             outdir=args.common_out,
             show=show,
             block_size=args.common_bt_blocksize,
+        )
+        run_common_tps_vs_shards(
+            local_csv, usa_csv, global_csv,
+            outdir=args.common_out,
+            show=show,
+            block_size=args.common_tps_blocksize,
         )
 
     # Per-signature-scheme plots

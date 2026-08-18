@@ -286,14 +286,21 @@ def simulate_gossip(source_idx: int, adjacency: List[List[int]], fanout: int,
     return rounds_used, total_messages, coverage, first_seen
 
 
-def gossip_broadcast_delay(rounds: int, total_messages: int, msg_size_bytes: int) -> float:
+def gossip_broadcast_delay(rounds: int, total_messages: int, msg_size_bytes: int,
+                            fanout: int) -> float:
     """
     Wall-clock CRITICAL-PATH delay for a gossip broadcast: rounds are
     sequential (one one-way latency hop paid per round, since round r+1
-    can't start before round r's informed set is known), and bandwidth
-    cost accrues across every message sent in every round (a sender's own
-    outbound link is a genuine, shared bottleneck for however many
-    messages it fans out that round).
+    can't start before round r's informed set is known). Bandwidth cost
+    is charged PER ROUND, using one sender's own outbound link (`fanout`
+    messages), not the whole round's messages summed across every sender
+    divided by one shared pipe — each node has its own independent uplink,
+    so a round with 500 nodes each sending `fanout` messages in parallel
+    takes the same wall-clock send time as a round with 1 node sending
+    `fanout` messages, not 500x longer. Every node samples exactly
+    `min(fanout, len(candidates))` peers (see `_gossip_peers`), and with
+    --neighbors always >> fanout in practice, that's just `fanout` for
+    every sender in every round.
 
     CPU processing cost is deliberately NOT included in this return value.
     Broadcast fan-out is one-to-many: each message lands on a different,
@@ -314,7 +321,8 @@ def gossip_broadcast_delay(rounds: int, total_messages: int, msg_size_bytes: int
     latency_total = sum(sample_one_way_latency_s() for _ in range(max(0, rounds)))
     if CTRL_BW_MBPS and CTRL_BW_MBPS > 0:
         Bps = CTRL_BW_MBPS * 1e6 / 8.0
-        send_time = (total_messages * msg_size_bytes) / max(Bps, 1e-9)
+        per_round_sender_bytes = max(0, int(fanout)) * msg_size_bytes
+        send_time = max(0, rounds) * (per_round_sender_bytes / max(Bps, 1e-9))
     else:
         send_time = 0.0
     total_broadcast_cpu_seconds += total_messages * recv_processing_s()
@@ -345,14 +353,24 @@ def gossip_broadcast_delay(rounds: int, total_messages: int, msg_size_bytes: int
 def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                                 link_state: Dict[int, Dict[int, str]],
                                 lazy_fanout: int = 2,
+                                msg_size_bytes: float = 0.0,
                                 ttl: Optional[int] = None,
                                 events: Optional[List[dict]] = None
-                                ) -> Tuple[int, int, int, int, int, float, Dict[int, int]]:
+                                ) -> Tuple[int, int, int, int, int, float, Dict[int, int], List[float]]:
     """
     Returns (rounds, eager_messages, lazy_messages, prunes, grafts, coverage,
-    first_seen). `first_seen` maps node id -> the round it first received
-    the message (source is 0) — the raw per-node hop-count data a CDF of
-    delivery-by-hop gets built from.
+    first_seen, per_round_max_bytes). `first_seen` maps node id -> the round
+    it first received the message (source is 0) — the raw per-node
+    hop-count data a CDF of delivery-by-hop gets built from.
+    `per_round_max_bytes[r]` is the most bytes any single node sent during
+    round r (eager pushes at `msg_size_bytes` each + lazy IHAVEs at
+    ANNOUNCE_MSG_SIZE_BYTES each, including any GRAFT re-send credited to
+    that round) — unlike gossip/gossipsub, a plumtree node's eager/lazy
+    split is per-node state that genuinely varies node to node, so this
+    has to be tracked directly rather than derived from a fixed constant.
+    `plumtree_broadcast_delay` uses this per round instead of summing
+    every node's bytes network-wide and dividing by one shared pipe, since
+    each node has its own independent outbound link.
 
     Eager sends are never capped — they're exactly the (small, converged)
     tree edges, and capping them would break coverage. Lazy IHAVE sends
@@ -364,7 +382,7 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
     """
     N = len(adjacency)
     if N <= 1:
-        return 0, 0, 0, 0, 0, 1.0, {source_idx: 0}
+        return 0, 0, 0, 0, 0, 1.0, {source_idx: 0}, []
 
     if ttl is None:
         ttl = HOP_TTL
@@ -377,6 +395,7 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
     prunes = 0
     grafts = 0
     rounds = 0
+    per_round_max_bytes: List[float] = []
 
     for _ in range(max(1, ttl)):
         if not frontier:
@@ -384,6 +403,7 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
         rounds += 1
         next_frontier: set = set()
         pending_lazy: Dict[int, int] = {}   # peer -> a candidate grafter
+        round_bytes: Dict[int, float] = {}  # node -> bytes it sent this round
 
         for node in frontier:
             node_state = link_state.setdefault(node, {})
@@ -395,6 +415,7 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
 
             for peer in eager_peers:
                 eager_messages += 1
+                round_bytes[node] = round_bytes.get(node, 0.0) + msg_size_bytes
                 if peer not in informed:
                     informed.add(peer)
                     first_seen[peer] = rounds
@@ -415,6 +436,7 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                 lazy_peers, min(max(0, lazy_fanout), len(lazy_peers)))
             for peer in lazy_targets:
                 lazy_messages += 1
+                round_bytes[node] = round_bytes.get(node, 0.0) + ANNOUNCE_MSG_SIZE_BYTES
                 informed_already = peer in informed
                 if events is not None:
                     events.append({"round": rounds, "kind": "lazy_ihave",
@@ -430,6 +452,7 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                 grafter_state = link_state.setdefault(grafter, {})
                 grafter_state[peer] = "eager"
                 eager_messages += 1
+                round_bytes[grafter] = round_bytes.get(grafter, 0.0) + msg_size_bytes
                 grafts += 1
                 informed.add(peer)
                 first_seen[peer] = rounds
@@ -438,22 +461,27 @@ def simulate_adaptive_plumtree(source_idx: int, adjacency: List[List[int]],
                     events.append({"round": rounds, "kind": "graft",
                                     "from": grafter, "to": peer})
 
+        per_round_max_bytes.append(max(round_bytes.values()) if round_bytes else 0.0)
+
         frontier = next_frontier
         if len(informed) >= N:
             break
 
     coverage = len(informed) / N
-    return rounds, eager_messages, lazy_messages, prunes, grafts, coverage, first_seen
+    return rounds, eager_messages, lazy_messages, prunes, grafts, coverage, first_seen, per_round_max_bytes
 
 
 def plumtree_broadcast_delay(rounds: int, eager_messages: int, lazy_messages: int,
-                              msg_size_bytes: int) -> float:
+                              per_round_max_bytes: List[float]) -> float:
     """
     Wall-clock CRITICAL-PATH delay. Eager tree-push messages carry the
     full payload; lazy IHAVE announcements are tiny (just a message ID),
     sized via ANNOUNCE_MSG_SIZE_BYTES. Rounds are sequential (one tree
-    layer at a time); bandwidth cost aggregates over eager + lazy
-    messages combined (a sender's own outbound link is a real bottleneck).
+    layer at a time); bandwidth is charged PER ROUND using
+    `per_round_max_bytes` — the busiest single node's own eager+lazy send
+    load that round (from `simulate_adaptive_plumtree`) — not every node's
+    bytes summed together and divided by one shared pipe, since each node
+    has its own independent outbound link.
 
     CPU processing cost is tracked in `total_broadcast_cpu_seconds`
     instead of being charged here — same reasoning as gossip_broadcast_delay:
@@ -465,10 +493,9 @@ def plumtree_broadcast_delay(rounds: int, eager_messages: int, lazy_messages: in
     if rounds <= 0 and eager_messages <= 0 and lazy_messages <= 0:
         return 0.0
     latency_total = sum(sample_one_way_latency_s() for _ in range(max(0, rounds)))
-    total_bytes = eager_messages * msg_size_bytes + lazy_messages * ANNOUNCE_MSG_SIZE_BYTES
     if CTRL_BW_MBPS and CTRL_BW_MBPS > 0:
         Bps = CTRL_BW_MBPS * 1e6 / 8.0
-        send_time = total_bytes / max(Bps, 1e-9)
+        send_time = sum(per_round_max_bytes) / max(Bps, 1e-9)
     else:
         send_time = 0.0
     total_messages = eager_messages + lazy_messages
@@ -552,23 +579,27 @@ def simulate_gossipsub(source_idx: int, adjacency: List[List[int]],
 
 
 def gossipsub_broadcast_delay(rounds: int, full_messages: int, ihave_messages: int,
-                              msg_size_bytes: int) -> float:
+                              msg_size_bytes: int, mesh_degree: int, ihave_fanout: int) -> float:
     """
     Wall-clock CRITICAL-PATH delay. Mesh messages carry the full payload;
-    IHAVE announcements are tiny (ANNOUNCE_MSG_SIZE_BYTES). Same
-    sequential-rounds / sender-bandwidth-bottleneck accounting as gossip
-    and Plumtree. CPU processing cost is tracked in
-    `total_broadcast_cpu_seconds` rather than charged here, for the same
-    reason: independent receivers process concurrently, not serially.
+    IHAVE announcements are tiny (ANNOUNCE_MSG_SIZE_BYTES). Rounds are
+    sequential; bandwidth is charged PER ROUND using one sender's own
+    outbound link (`mesh_degree` full pushes + `ihave_fanout` IHAVEs),
+    same reasoning as gossip_broadcast_delay — each node has its own
+    independent uplink, not a pipe shared across every sender that round.
+    CPU processing cost is tracked in `total_broadcast_cpu_seconds` rather
+    than charged here, for the same reason: independent receivers process
+    concurrently, not serially.
     """
     global total_broadcast_cpu_seconds
     if rounds <= 0 and full_messages <= 0 and ihave_messages <= 0:
         return 0.0
     latency_total = sum(sample_one_way_latency_s() for _ in range(max(0, rounds)))
-    total_bytes = full_messages * msg_size_bytes + ihave_messages * ANNOUNCE_MSG_SIZE_BYTES
     if CTRL_BW_MBPS and CTRL_BW_MBPS > 0:
         Bps = CTRL_BW_MBPS * 1e6 / 8.0
-        send_time = total_bytes / max(Bps, 1e-9)
+        per_round_sender_bytes = (max(0, int(mesh_degree)) * msg_size_bytes
+                                   + max(0, int(ihave_fanout)) * ANNOUNCE_MSG_SIZE_BYTES)
+        send_time = max(0, rounds) * (per_round_sender_bytes / max(Bps, 1e-9))
     else:
         send_time = 0.0
     total_messages = full_messages + ihave_messages
@@ -614,6 +645,98 @@ def kademlia_route_delay(hops: int, msg_size_bytes: int) -> float:
         send_time = 0.0
     cpu_time = hops * recv_processing_s()
     return latency_total + send_time + cpu_time
+
+
+# ============================================================
+# Conflict-check overhead, from real benchmarks
+#
+# conflict_check_benchmark_c.csv measures five competing techniques for
+# detecting conflicting transactions in a block: hash_set, nonce_hash_set,
+# sort_scan, nonce_sort_scan, and radix_sort. It's a long-format CSV — one
+# row per (algorithm, run, n), 10 runs per (algorithm, n) — so each
+# algorithm's cost curve is the mean total_ms over its 10 runs at each n.
+# --conflict_check_method selects which technique the run charges, so they
+# can be run separately and compared (rather than auto-picking a winner).
+# ============================================================
+CONFLICT_CHECK_BENCHMARK_CSV = Path(__file__).resolve().parent / "conflict_check_benchmark_c.csv"
+
+
+def _load_conflict_check_tables() -> Dict[str, List[Tuple[int, float]]]:
+    """
+    Loads {algorithm: [(n, mean_total_ms), ...]} from conflict_check_benchmark_c.csv,
+    averaging total_ms over the repeated runs at each (algorithm, n) and
+    sorting each algorithm's table by n. Returns {} if the file is missing,
+    so the simulation still runs (with zero overhead) if the benchmark CSV
+    isn't present.
+    """
+    sums: Dict[Tuple[str, int], float] = {}
+    counts: Dict[Tuple[str, int], int] = {}
+    if not CONFLICT_CHECK_BENCHMARK_CSV.exists():
+        return {}
+    with open(CONFLICT_CHECK_BENCHMARK_CSV, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            algo = r["algorithm"]
+            n = int(r["n"])
+            key = (algo, n)
+            sums[key] = sums.get(key, 0.0) + float(r["total_ms"])
+            counts[key] = counts.get(key, 0) + 1
+
+    tables: Dict[str, List[Tuple[int, float]]] = {}
+    for (algo, n), total in sums.items():
+        tables.setdefault(algo, []).append((n, total / counts[(algo, n)]))
+    for rows in tables.values():
+        rows.sort(key=lambda t: t[0])
+    return tables
+
+
+_CONFLICT_CHECK_TABLES = _load_conflict_check_tables()
+
+
+def _interp_ms(table: List[Tuple[int, float]], n: int) -> float:
+    """
+    Linearly interpolates a benchmark table (sorted (n, ms) pairs) at n.
+    Below the smallest measured n, scales linearly from the origin using
+    the smallest bucket's per-tx rate; above the largest, extrapolates
+    linearly using the slope of the last measured segment. Real block
+    sizes rarely land exactly on a benchmarked n (some transactions can
+    miss a block's cutoff), so interpolation — not exact lookup — is the
+    right fit here.
+    """
+    if not table or n <= 0:
+        return 0.0
+    if len(table) == 1:
+        n0, ms0 = table[0]
+        return (ms0 / n0) * n
+
+    if n <= table[0][0]:
+        n1, ms1 = table[0]
+        return (ms1 / n1) * n
+    if n >= table[-1][0]:
+        n0, ms0 = table[-2]
+        n1, ms1 = table[-1]
+        slope = (ms1 - ms0) / (n1 - n0)
+        return ms1 + slope * (n - n1)
+
+    for (n0, ms0), (n1, ms1) in zip(table, table[1:]):
+        if n0 <= n <= n1:
+            frac = (n - n0) / (n1 - n0)
+            return ms0 + frac * (ms1 - ms0)
+    return 0.0
+
+
+def conflict_check_overhead_s(n: int, method: str) -> float:
+    """
+    Single-thread conflict-check overhead (seconds) for n transactions,
+    using the named technique, interpolated from conflict_check_benchmark_c.csv.
+    """
+    table = _CONFLICT_CHECK_TABLES.get(method)
+    if table is None:
+        raise ValueError(
+            "conflict_check method must be one of: "
+            "hash_set, nonce_hash_set, sort_scan, nonce_sort_scan, radix_sort"
+        )
+    return _interp_ms(table, n) / 1000.0
 
 
 # ============================================================
@@ -717,7 +840,7 @@ def coord(env, nodes, miners, target_bt, diff0, blocks_limit, total_blocksize,
           print_int, dbg, wallets, tx_per_wallet, init_reward, halving_interval,
           shards, tx_cost_ms, rtt_ms, coord_rounds, msg_cost, msg_size,
           control_bw_mbps, overlap_broadcast, msg_proc_ms,
-          quiet_blocks=False):
+          quiet_blocks=False, conflict_check_method="none"):
     global network_data, io_requests, total_tx, total_coins
 
     if not miners:
@@ -761,6 +884,7 @@ def coord(env, nodes, miners, target_bt, diff0, blocks_limit, total_blocksize,
 
         max_shard_tx = (take + S - 1) // S if S > 0 else 0
         dt_verify = max_shard_tx * tx_cost_s
+        dt_conflict = conflict_check_overhead_s(max_shard_tx, conflict_check_method) if conflict_check_method != "none" else 0.0
         dt_coord = coord_delay
         msgs = metronome_messages(S, len(nodes))
         total_coordination_messages += msgs
@@ -768,7 +892,7 @@ def coord(env, nodes, miners, target_bt, diff0, blocks_limit, total_blocksize,
         block_msg_cost = msgs * float(msg_cost or 0.0)
         total_msg_cost += block_msg_cost
 
-        dt_rest = dt_verify + dt_coord + dt_ctrl_net
+        dt_rest = dt_verify + dt_conflict + dt_coord + dt_ctrl_net
         round_dt = dt_mine + dt_rest
         if dt_rest > 0:
             yield env.timeout(dt_rest)
@@ -786,6 +910,7 @@ def coord(env, nodes, miners, target_bt, diff0, blocks_limit, total_blocksize,
                 f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
                 f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
                 f"dt={round_dt:.3f}s mine={dt_mine:.3f}s verify={dt_verify:.3f}s "
+                f"conflict={dt_conflict:.3f}s "
                 f"coord={dt_coord:.3f}s ctrl_net={dt_ctrl_net:.3f}s "
                 f"[{net_note}] Msgs_tot:{total_coordination_messages} MsgCost_blk:{block_msg_cost:.2f}"
             )
@@ -803,7 +928,11 @@ def winner_announce_phase(S: int, N: int, msg_size: int):
     if S <= 0 or N <= 0:
         return 0.0, 0
     msgs = S * N
-    dt = control_phase_delay(msgs, msg_size)
+    # One-to-many (each of S winning shards announces to N peers): each peer
+    # processes its own copy on its own CPU concurrently, so charging N
+    # receivers' processing time onto the sender's timeline would double
+    # count it — same reasoning as leader_announce_phase / gossip_broadcast_delay.
+    dt = control_phase_delay(msgs, msg_size, charge_recv_cpu=False)
     return dt, msgs
 
 
@@ -819,7 +948,8 @@ def coord_no_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
                        total_blocksize, print_int, dbg, wallets, tx_per_wallet,
                        init_reward, halving_interval, shards, tx_cost_ms,
                        msg_size, control_bw_mbps,
-                       overlap_broadcast, msg_proc_ms, msg_cost, quiet_blocks=False):
+                       overlap_broadcast, msg_proc_ms, msg_cost, quiet_blocks=False,
+                       conflict_check_method="none"):
     global network_data, io_requests, total_tx, total_coins
 
     if not miners:
@@ -861,6 +991,7 @@ def coord_no_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
 
         max_shard_tx = (take + S - 1) // S if S > 0 else 0
         dt_verify = max_shard_tx * tx_cost_s
+        dt_conflict = conflict_check_overhead_s(max_shard_tx, conflict_check_method) if conflict_check_method != "none" else 0.0
         N = len(nodes)
         dt_ann, msgs_ann = winner_announce_phase(S, N, msg_size)
         dt_pair, msgs_pair = winner_pairwise_phase(S, msg_size)
@@ -868,7 +999,7 @@ def coord_no_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
         total_control_msgs += (msgs_ann + msgs_pair)
         total_msg_cost += (msgs_ann + msgs_pair) * float(msg_cost or 0.0)
 
-        dt_rest = dt_verify + dt_control
+        dt_rest = dt_verify + dt_conflict + dt_control
         round_dt = dt_mine + dt_rest
         if dt_rest > 0:
             yield env.timeout(dt_rest)
@@ -886,6 +1017,7 @@ def coord_no_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
                 f"[{env.now:.2f}] Block {bc} contains {txs_next-1} tx "
                 f"(total_cap={tot_cap}, shards={S}, per_shard≈{(tot_cap+S-1)//S if S>0 else 0}) "
                 f"dt={round_dt:.3f}s mine={dt_mine:.3f}s verify={dt_verify:.3f}s "
+                f"conflict={dt_conflict:.3f}s "
                 f"announce+pair={dt_control:.3f}s [{net_note}] "
                 f"CtrlMsgs:{total_control_msgs} MsgCost_tot:{total_msg_cost:.2f}"
             )
@@ -943,19 +1075,20 @@ def broadcast_phase(protocol: str, source_node: int, N: int,
     if protocol == "gossip":
         rounds, messages, coverage, first_seen = simulate_gossip(
             source_node, adjacency, GOSSIP_FANOUT)
-        dt = gossip_broadcast_delay(rounds, messages, msg_size)
+        dt = gossip_broadcast_delay(rounds, messages, msg_size, GOSSIP_FANOUT)
         return dt, messages, coverage, rounds, first_seen
     elif protocol == "plumtree":
         if plumtree_state is None:
             plumtree_state = {}
-        rounds, eager, lazy, _prunes, _grafts, coverage, first_seen = simulate_adaptive_plumtree(
-            source_node, adjacency, plumtree_state, PLUMTREE_LAZY_FANOUT)
-        dt = plumtree_broadcast_delay(rounds, eager, lazy, msg_size)
+        rounds, eager, lazy, _prunes, _grafts, coverage, first_seen, per_round_max_bytes = simulate_adaptive_plumtree(
+            source_node, adjacency, plumtree_state, PLUMTREE_LAZY_FANOUT, msg_size)
+        dt = plumtree_broadcast_delay(rounds, eager, lazy, per_round_max_bytes)
         return dt, eager + lazy, coverage, rounds, first_seen
     elif protocol == "gossipsub":
         rounds, full, ihave, coverage, first_seen = simulate_gossipsub(
             source_node, adjacency, GOSSIPSUB_MESH_DEGREE, GOSSIPSUB_IHAVE_FANOUT)
-        dt = gossipsub_broadcast_delay(rounds, full, ihave, msg_size)
+        dt = gossipsub_broadcast_delay(rounds, full, ihave, msg_size,
+                                        GOSSIPSUB_MESH_DEGREE, GOSSIPSUB_IHAVE_FANOUT)
         return dt, full + ihave, coverage, rounds, first_seen
     else:  # "flood": the original flat O(N) one-shot broadcast baseline
         dt, messages = leader_announce_phase(N, msg_size)
@@ -997,7 +1130,8 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
                            msg_size, control_bw_mbps,
                            overlap_broadcast, msg_proc_ms, msg_cost,
                            verify_mode="leader", quiet_blocks=False,
-                           broadcast_protocol="gossip", shard_comm_protocol="kademlia"):
+                           broadcast_protocol="gossip", shard_comm_protocol="kademlia",
+                           conflict_check_method="none"):
     global network_data, io_requests, total_tx, total_coins
 
     if not miners:
@@ -1085,17 +1219,27 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
 
         if verify_mode_used == "leader":
             dt_verify_term = (take * tx_cost_s) if has_tx else 0.0
+            dt_conflict_term = conflict_check_overhead_s(take, conflict_check_method) if (has_tx and conflict_check_method != "none") else 0.0
+            dt_verify_term += dt_conflict_term
             verify_note = "verify_all@leader"
         elif verify_mode_used == "leader_par":
             threads = max(1, int(os.getenv("LEADER_VERIFY_THREADS", "8")))
             dt_verify_term = (take * tx_cost_s / threads) if has_tx else 0.0
+            dt_conflict_term = (conflict_check_overhead_s(take, conflict_check_method) / threads) if (has_tx and conflict_check_method != "none") else 0.0
+            dt_verify_term += dt_conflict_term
             verify_note = f"verify_all@leader_par({threads}t)"
         elif verify_mode_used == "shard":
-            # Each winning shard verifies its own transactions starting when it won.
-            # Verification overlaps with remaining mining time for other shards.
-            # Only the remaining tail after dt_mine adds to round time.
+            # Each winning shard verifies its own transactions (signatures +
+            # local double-spend check) as soon as it wins, overlapping with
+            # remaining mining time for other shards — only the remaining
+            # tail after dt_mine adds to round time. Once every winning shard
+            # has reported in, the leader runs one more conflict check over
+            # the *entire* block (all shards' transactions combined) to catch
+            # cross-shard conflicts a shard can't see from just its own
+            # slice — there is no shard-only mode that skips this.
             actual_per_shard = (take + actual_winners - 1) // actual_winners if (has_tx and actual_winners > 0) else 0
-            dt_v = actual_per_shard * tx_cost_s
+            dt_conflict_shard = conflict_check_overhead_s(actual_per_shard, conflict_check_method) if conflict_check_method != "none" else 0.0
+            dt_v = actual_per_shard * tx_cost_s + dt_conflict_shard
             dt_verify_term = max(0.0, last_winner_time + dt_v - dt_mine)
             if shard_comm_protocol == "kademlia":
                 dt_attest, msgs_attest = to_leader_kademlia_phase(
@@ -1106,7 +1250,13 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
             dt_control += dt_attest
             total_control_msgs += msgs_attest
             total_msg_cost += msgs_attest * float(msg_cost or 0.0)
-            verify_note = f"verify@shards+attest(W={actual_winners}/{S})"
+
+            # Leader's cross-shard pass starts only after every shard has
+            # finished its local check and reported in — it needs the full
+            # transaction set, so this is charged sequentially on top.
+            dt_conflict_leader = conflict_check_overhead_s(take, conflict_check_method) if (has_tx and conflict_check_method != "none") else 0.0
+            dt_verify_term += dt_conflict_leader
+            verify_note = f"verify@shards+leader_crossshard(W={actual_winners}/{S})"
         else:
             raise ValueError("--verify_mode must be one of: leader, shard, leader_par")
 
@@ -1148,7 +1298,7 @@ def coord_leader_metronome(env, nodes, miners, target_bt, diff0, blocks_limit,
                 f"[{env.now:.2f}] Block {bc} (leader={leader_idx}, winners={actual_winners}/{S}) "
                 f"tx={txs_next-1} dt={round_dt:.3f}s "
                 f"mine={dt_mine:.3f}s control={dt_control:.3f}s "
-                f"{verify_note}={dt_verify_term:.3f}s "
+                f"{verify_note}={dt_verify_term:.3f}s conflict={dt_conflict_term:.3f}s "
                 f"[{net_note}] CtrlMsgs_tot:{total_control_msgs} MsgCost_tot:{total_msg_cost:.2f}"
             )
         if print_int and bc % print_int == 0:
@@ -1373,7 +1523,24 @@ def main():
     p.add_argument("--shard_comm_protocol", type=str, default="kademlia",
                    choices=["kademlia", "direct"])
     p.add_argument("--verify_mode", type=str, default="leader",
-                   choices=["leader", "shard", "leader_par"])
+                   choices=["leader", "shard", "leader_par"],
+                   help="Who verifies transactions and where conflict checks are "
+                        "charged. 'leader'/'leader_par': the leader alone verifies "
+                        "the whole block (leader_par splits it across "
+                        "LEADER_VERIFY_THREADS threads). 'shard': each winning "
+                        "shard verifies its own slice for local double-spend, "
+                        "then the leader re-runs the conflict check over the "
+                        "entire block afterward to catch cross-shard conflicts.")
+    p.add_argument("--conflict_check_method", type=str, default="none",
+                   choices=["none", "hash_set", "nonce_hash_set", "sort_scan",
+                            "nonce_sort_scan", "radix_sort"],
+                   help="Add real measured conflict-check overhead per block "
+                        "(single-thread), from conflict_check_benchmark_c.csv "
+                        "(mean of 10 benchmark runs per transaction count), "
+                        "interpolated by transaction count. 'none' disables it; "
+                        "'hash_set'/'nonce_hash_set'/'sort_scan'/'nonce_sort_scan'/"
+                        "'radix_sort' each charge that technique's cost, so they "
+                        "can be run separately and compared.")
     p.add_argument("--pool_mode", type=str, default="count",
                    choices=["count", "deque"])
     p.add_argument("--seed", type=int, default=None,
@@ -1509,6 +1676,7 @@ def main():
                 verify_mode=args.verify_mode, quiet_blocks=args.quiet_blocks,
                 broadcast_protocol=args.broadcast_protocol,
                 shard_comm_protocol=args.shard_comm_protocol,
+                conflict_check_method=args.conflict_check_method,
             )
         )
     elif args.no_metronome:
@@ -1525,6 +1693,7 @@ def main():
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms, msg_cost=args.cost,
                 quiet_blocks=args.quiet_blocks,
+                conflict_check_method=args.conflict_check_method,
             )
         )
     else:
@@ -1542,6 +1711,7 @@ def main():
                 control_bw_mbps=args.control_bw_mbps,
                 overlap_broadcast=args.overlap_broadcast,
                 msg_proc_ms=args.msg_proc_ms, quiet_blocks=args.quiet_blocks,
+                conflict_check_method=args.conflict_check_method,
             )
         )
 
@@ -1600,14 +1770,15 @@ def main():
         "expected_blocktime":  float(args.blocktime),
         "broadcast_protocol":  str(args.broadcast_protocol or "") if args.leader_metronome else "n/a",
         "shard_comm_protocol": str(args.shard_comm_protocol or "") if args.leader_metronome else "n/a",
+        "verify_mode":         str(args.verify_mode or "") if args.leader_metronome else "n/a",
     }
     print(f"RESULT_JSON {json.dumps(result_json)}")
 
     PAPER_CSV_HEADER = [
-        "currency", "nodes", "wallets", "miners", "transactions", "interval",
+        "currency", "nodes", "neighbors", "wallets", "miners", "transactions", "interval",
         "shards", "average block time", "block size", "messages", "mode", "tps",
         "no. of blocks generated", "blocktime in configuration file", "sig_scheme",
-        "broadcast_protocol", "shard_comm_protocol", "seed",
+        "broadcast_protocol", "shard_comm_protocol", "verify_mode", "seed", "conflict_check",
         "broadcast_cpu_seconds", "hop_p50", "hop_p90", "hop_p99", "hop_max",
     ]
 
@@ -1615,9 +1786,10 @@ def main():
         path = Path(results_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        key_fields = ["currency", "shards", "block size", "mode",
+        key_fields = ["currency", "shards", "block size", "mode", "neighbors",
                       "blocktime in configuration file", "sig_scheme",
-                      "broadcast_protocol", "shard_comm_protocol", "seed"]
+                      "broadcast_protocol", "shard_comm_protocol", "verify_mode",
+                      "seed", "conflict_check"]
 
         def row_key(r: dict):
             return tuple(str(r.get(k, "")) for k in key_fields)
@@ -1690,6 +1862,7 @@ def main():
     paper_row = {
         "currency":                          currency,
         "nodes":                             int(args.nodes or 0),
+        "neighbors":                         int(args.neighbors or 0),
         "wallets":                           int(args.wallets or 0),
         "miners":                            int(args.miners or 0),
         "transactions":                      int(args.transactions or 0),
@@ -1705,7 +1878,9 @@ def main():
         "sig_scheme":                        str(args.sig_scheme or ""),
         "broadcast_protocol":                str(args.broadcast_protocol or "") if protocol_relevant else "n/a",
         "shard_comm_protocol":               str(args.shard_comm_protocol or "") if protocol_relevant else "n/a",
+        "verify_mode":                       str(args.verify_mode or "") if protocol_relevant else "n/a",
         "seed":                              int(args.seed) if args.seed is not None else "",
+        "conflict_check":                    str(args.conflict_check_method),
         "broadcast_cpu_seconds":             float(sim_summary.get("broadcast_cpu_seconds", 0.0)) if sim_summary else 0.0,
         "hop_p50":                           hop_stats["hop_p50"] if hop_stats else "",
         "hop_p90":                           hop_stats["hop_p90"] if hop_stats else "",

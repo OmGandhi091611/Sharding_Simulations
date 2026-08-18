@@ -20,6 +20,7 @@ cover. Run once per network condition, same as graph.py's memo_* graphs:
 
 import argparse
 import os
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -37,14 +38,28 @@ SHARD_COMM_STYLES = {
     "direct":   "--",
 }
 
+# Bumped up across the board so nothing reads as too small in the paper.
+TITLE_FS        = 16
+SUPTITLE_FS     = 18
+LABEL_FS        = 15
+TICK_FS         = 13
+LEGEND_FS       = 12
+LEGEND_TITLE_FS = 13
 
-def _load_network_csv(csv_path: str):
+
+def _load_network_csv(csv_path: str, conflict_check: str = None):
     if not os.path.exists(csv_path):
         print(f"[skip] network CSV not found: {csv_path}")
         return None
 
     df = pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
     df.columns = [str(c).strip() for c in df.columns]
+
+    if conflict_check is not None and "conflict_check" in df.columns:
+        df = df[df["conflict_check"] == conflict_check]
+        if df.empty:
+            print(f"[skip] no rows with conflict_check={conflict_check} in {csv_path}")
+            return None
 
     required = {
         "shards":       ["shards"],
@@ -54,6 +69,8 @@ def _load_network_csv(csv_path: str):
         "messages":     ["messages"],
         "bprot":        ["broadcast_protocol"],
         "scomm":        ["shard_comm_protocol"],
+        "bt_cfg":       ["blocktime in configuration file", "configured blocktime",
+                          "config blocktime", "blocktime", "block time"],
     }
     cols = {k: _pick_col(df, cands) for k, cands in required.items()}
     missing = [k for k, c in cols.items() if c is None]
@@ -62,14 +79,15 @@ def _load_network_csv(csv_path: str):
         return None
 
     df = ensure_numeric(df, [cols["shards"], cols["block_size"], cols["abt"],
-                              cols["tps"], cols["messages"]])
+                              cols["tps"], cols["messages"], cols["bt_cfg"]])
     df["broadcast_cpu_seconds"] = pd.to_numeric(
         df.get("broadcast_cpu_seconds"), errors="coerce") if "broadcast_cpu_seconds" in df.columns else float("nan")
     for hop_col in ("hop_p50", "hop_p90", "hop_p99", "hop_max"):
         df[hop_col] = pd.to_numeric(
             df.get(hop_col), errors="coerce") if hop_col in df.columns else float("nan")
 
-    df = df.dropna(subset=[cols["shards"], cols["block_size"], cols["abt"], cols["tps"], cols["messages"]]).copy()
+    df = df.dropna(subset=[cols["shards"], cols["block_size"], cols["abt"],
+                            cols["tps"], cols["messages"], cols["bt_cfg"]]).copy()
     if df.empty:
         return None
 
@@ -80,11 +98,111 @@ def _load_network_csv(csv_path: str):
     df["messages_val"]   = df[cols["messages"]].astype(float)
     df["broadcast_protocol"]  = df[cols["bprot"]].astype(str)
     df["shard_comm_protocol"] = df[cols["scomm"]].astype(str)
+    df["blocktime_cfg"]  = df[cols["bt_cfg"]].astype(float).round(6)
     return df
 
 
 def _x_positions(shards_sorted):
     return {s: i * 2 for i, s in enumerate(shards_sorted)}
+
+
+# ----------------------------
+# Neighbors/fanout sweep — reads the CSVs written by
+# Parallel_processes/fanout_neighbors_parallel.py
+# (Results/fanout_neighbors_results_<env>.csv). Shards/block size/block time/
+# protocols are all fixed in that sweep; the only swept axis is
+# neighbors == gossip_fanout, so these plots are single-series (no
+# per-protocol grouping like the shard sweep above).
+# ----------------------------
+def _load_fanout_csv(csv_path: str):
+    if not os.path.exists(csv_path):
+        print(f"[skip] fanout/neighbors CSV not found: {csv_path}")
+        return None
+
+    df = pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
+    df.columns = [str(c).strip() for c in df.columns]
+
+    required = {
+        "neighbors": ["neighbors"],
+        "tps":       ["tps"],
+        "messages":  ["messages"],
+    }
+    cols = {k: _pick_col(df, cands) for k, cands in required.items()}
+    missing = [k for k, c in cols.items() if c is None]
+    if missing:
+        print(f"[skip] fanout/neighbors CSV missing required columns: {missing}")
+        return None
+
+    df = ensure_numeric(df, [cols["neighbors"], cols["tps"], cols["messages"]])
+    df = df.dropna(subset=[cols["neighbors"], cols["tps"], cols["messages"]]).copy()
+    if df.empty:
+        return None
+
+    df["neighbors_int"] = df[cols["neighbors"]].astype(int)
+    df["tps_val"]        = df[cols["tps"]].astype(float)
+    df["messages_val"]   = df[cols["messages"]].astype(float)
+    return df
+
+
+def _plot_metric_vs_neighbors(df, value_col: str, agg: str, ylabel: str,
+                               title: str, out_name: str, outdir: str, show: bool,
+                               log_y: bool = False):
+    grouped = (
+        df.groupby("neighbors_int")[value_col]
+        .agg(agg)
+        .reset_index()
+        .sort_values("neighbors_int")
+    )
+
+    all_neighbors = sorted(grouped["neighbors_int"].unique().tolist())
+    x_positions = _x_positions(all_neighbors)
+    x_vals = [x_positions[n] for n in grouped["neighbors_int"]]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(x_vals, grouped[value_col],
+            marker="o", linewidth=2, markersize=5, color="#1f77b4")
+
+    ax.set_xlabel("Neighbors = Gossip Fanout", fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=LABEL_FS)
+    ax.set_title(title, fontsize=TITLE_FS)
+    ax.set_xticks([x_positions[n] for n in all_neighbors])
+    ax.set_xticklabels([str(n) for n in all_neighbors], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
+    if log_y:
+        ax.set_yscale("log")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def run_tps_vs_neighbors(fanout_csv: str, outdir: str, show: bool):
+    df = _load_fanout_csv(fanout_csv)
+    if df is None:
+        print(f"[skip] tps-vs-neighbors: no usable data in {fanout_csv}")
+        return
+    _plot_metric_vs_neighbors(
+        df, "tps_val", "mean", "Mean TPS",
+        "TPS vs Neighbors / Gossip Fanout (512 shards, block size 524288)",
+        "network_tps_vs_neighbors.png", outdir, show,
+    )
+
+
+def run_messages_vs_neighbors(fanout_csv: str, outdir: str, show: bool):
+    df = _load_fanout_csv(fanout_csv)
+    if df is None:
+        print(f"[skip] messages-vs-neighbors: no usable data in {fanout_csv}")
+        return
+    _plot_metric_vs_neighbors(
+        df, "messages_val", "mean", "Messages",
+        "Messages vs Neighbors / Gossip Fanout (512 shards, block size 524288)",
+        "network_messages_vs_neighbors.png", outdir, show, log_y=True,
+    )
 
 
 # ----------------------------
@@ -117,14 +235,15 @@ def _plot_metric_by_protocol(df, value_col: str, agg: str, ylabel: str,
         ax.plot(x_vals, row[value_col], marker="o", linewidth=2, markersize=5,
                 label=bprot, color=color)
 
-    ax.set_xlabel("Number of Shards", fontsize=13)
-    ax.set_ylabel(ylabel, fontsize=13)
-    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=LABEL_FS)
+    ax.set_title(title, fontsize=TITLE_FS)
     ax.set_xticks([x_positions[s] for s in all_shards])
     ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
     if log_y:
         ax.set_yscale("log")
-    ax.legend(title="Broadcast Protocol", fontsize=9, title_fontsize=10)
+    ax.legend(title="Broadcast Protocol", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
 
@@ -160,14 +279,15 @@ def _plot_metric_by_protocol_bar(df, value_col: str, agg: str, ylabel: str,
         ax.bar(x_vals, y_vals, width=bar_width * 0.95,
                label=bprot, color=PROTOCOL_COLORS.get(bprot))
 
-    ax.set_xlabel("Number of Shards", fontsize=13)
-    ax.set_ylabel(ylabel, fontsize=13)
-    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=LABEL_FS)
+    ax.set_title(title, fontsize=TITLE_FS)
     ax.set_xticks(x)
     ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
     if log_y:
         ax.set_yscale("log")
-    ax.legend(title="Broadcast Protocol", fontsize=9, title_fontsize=10)
+    ax.legend(title="Broadcast Protocol", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
     ax.grid(True, axis="y", linestyle="--", alpha=0.4)
     fig.tight_layout()
 
@@ -179,8 +299,8 @@ def _plot_metric_by_protocol_bar(df, value_col: str, agg: str, ylabel: str,
         plt.close(fig)
 
 
-def run_protocol_tps_vs_shards(network_csv: str, outdir: str, show: bool):
-    df = _load_network_csv(network_csv)
+def run_protocol_tps_vs_shards(network_csv: str, outdir: str, show: bool, conflict_check: str = None):
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
     if df is None:
         print(f"[skip] tps-vs-shards: no usable data in {network_csv}")
         return
@@ -191,8 +311,138 @@ def run_protocol_tps_vs_shards(network_csv: str, outdir: str, show: bool):
     )
 
 
-def run_protocol_blocktime_vs_shards(network_csv: str, outdir: str, show: bool, block_size: int = None):
-    df = _load_network_csv(network_csv)
+def _fmt_bt(t):
+    if t < 1:
+        return f"{t:.2f}s"
+    elif t < 10:
+        return f"{t:.1f}s"
+    else:
+        return f"{t:.0f}s"
+
+
+def _draw_tps_vs_shards_grid(plot_df, abt_at_max_shards, block_sizes, all_blocktimes,
+                              x_positions, xticks, xticklabels, rows, cols,
+                              suptitle, out_name, outdir, show):
+    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 4.6 * rows), sharey=False)
+    axes = np.array(axes).reshape(-1)
+
+    legend_handles = None
+    legend_labels = None
+
+    for i, bs in enumerate(block_sizes):
+        ax = axes[i]
+        sub = plot_df[plot_df["block_size_int"] == bs]
+        if sub.empty:
+            ax.axis("off")
+            continue
+
+        _half = len(all_blocktimes) // 2
+        for idx, bt in enumerate(all_blocktimes):
+            line_df = sub[sub["blocktime_cfg"] == bt].sort_values("shards_int")
+            if line_df.empty:
+                continue
+            x_vals = [x_positions[s] for s in line_df["shards_int"]]
+            ax.plot(
+                x_vals, line_df["tps_val"],
+                marker="o", linewidth=2, markersize=5,
+                linestyle=":" if idx < _half else "-",
+                label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt)),
+            )
+
+        ax.set_title(f"Block Size = {bs:,}", fontsize=TITLE_FS)
+        ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels, rotation=45, ha="right")
+        ax.tick_params(labelsize=TICK_FS)
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.set_yscale("log")
+        ax.margins(y=0.15)
+        ax.set_ylabel("TPS", fontsize=LABEL_FS)
+
+        if legend_handles is None:
+            legend_handles, legend_labels = ax.get_legend_handles_labels()
+
+    for j in range(len(block_sizes), len(axes)):
+        axes[j].axis("off")
+
+    fig.suptitle(suptitle, fontsize=SUPTITLE_FS)
+    fig.tight_layout(rect=[0, 0.08, 1, 0.94])
+
+    if legend_handles:
+        fig.legend(
+            legend_handles, legend_labels,
+            loc="lower center", ncol=min(7, len(legend_labels)),
+            bbox_to_anchor=(0.5, 0.0), frameon=True, fontsize=LEGEND_FS,
+        )
+
+    safe_mkdir(outdir)
+    fig.savefig(os.path.join(outdir, out_name), dpi=300, bbox_inches="tight")
+    print(f"[done] {os.path.join(outdir, out_name)}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def run_tps_vs_shards_per_blocksize(network_csv: str, outdir: str, show: bool, conflict_check: str = None):
+    """Mirrors graph.py's run_memo_per_blocksize: split into a part1 (2x2,
+    4 largest block sizes) and part2 (2x3, remaining block sizes) grid — one
+    subplot per block size, one line per configured blocktime — for the
+    network (protocol-sweep) results, which carry a seed axis memo's
+    already-aggregated CSV doesn't, so each (block_size, blocktime, shards)
+    point is meaned over seeds first. Shows the diminishing-returns/
+    peak-then-decline shape (coordination overhead outgrowing parallelism
+    gains) per block size."""
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
+    if df is None:
+        print(f"[skip] tps-vs-shards-per-blocksize: no usable data in {network_csv}")
+        return
+
+    plot_df = (
+        df.groupby(["block_size_int", "blocktime_cfg", "shards_int"])["tps_val"]
+        .mean()
+        .reset_index()
+        .sort_values(["block_size_int", "blocktime_cfg", "shards_int"])
+    )
+
+    # Actual block time at max shard count per (block_size, configured_blocktime) — used as line label
+    abt_at_max_shards = (
+        df.sort_values("shards_int")
+        .groupby(["block_size_int", "blocktime_cfg"])["abt_val"]
+        .last()
+        .to_dict()
+    )
+
+    block_sizes = sorted(plot_df["block_size_int"].unique().tolist(), reverse=True)
+    if not block_sizes:
+        print("[skip] no valid block sizes for tps-vs-shards-per-blocksize")
+        return
+
+    all_blocktimes = sorted(plot_df["blocktime_cfg"].unique().tolist())
+    all_shards = sorted(plot_df["shards_int"].unique().tolist())
+    x_positions = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks = [x_positions[s] for s in all_shards]
+    xticklabels = [str(s) for s in all_shards]
+
+    groups = [block_sizes[:4], block_sizes[4:]]
+    group_names = ["network_tps_vs_shards_part1.png", "network_tps_vs_shards_part2.png"]
+    group_grids = [(2, 2), (2, 3)]  # (rows, cols) for part1 and part2
+
+    for group_idx, bs_group in enumerate(groups):
+        bs_group = [b for b in bs_group if b in block_sizes]
+        if not bs_group:
+            continue
+        rows, cols = group_grids[group_idx]
+        _draw_tps_vs_shards_grid(
+            plot_df, abt_at_max_shards, bs_group, all_blocktimes,
+            x_positions, xticks, xticklabels, rows, cols,
+            "Network Protocol Sweep: TPS vs Number of Shards",
+            group_names[group_idx], outdir, show,
+        )
+
+
+def run_protocol_blocktime_vs_shards(network_csv: str, outdir: str, show: bool, block_size: int = None, conflict_check: str = None):
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
     if df is None:
         print(f"[skip] blocktime-vs-shards: no usable data in {network_csv}")
         return
@@ -210,8 +460,76 @@ def run_protocol_blocktime_vs_shards(network_csv: str, outdir: str, show: bool, 
     )
 
 
-def run_protocol_messages_vs_shards(network_csv: str, outdir: str, show: bool):
-    df = _load_network_csv(network_csv)
+def run_blocktime_vs_shards_per_target(network_csv: str, outdir: str, show: bool,
+                                        block_size: int, conflict_check: str = None):
+    """Companion to run_tps_vs_shards_per_blocksize: instead of collapsing the
+    14-value target-blocktime sweep down to a single legend number per line
+    (the actual block time at max shards only), this plots every target's
+    full actual-block-time-vs-shards curve for one fixed block size, with a
+    dotted reference line at each target's *configured* value. The solid
+    curve's value at shards=512 is exactly the number that shows up as a
+    legend label in the TPS-vs-shards panel for that same (block_size,
+    target) pair — this plot exists to explain where every one of those
+    labels comes from, not just the fastest (min) one that the common
+    blocktime-vs-shards graph shows."""
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
+    if df is None:
+        print(f"[skip] blocktime-vs-shards-per-target: no usable data in {network_csv}")
+        return
+    df = df[df["block_size_int"] == block_size]
+    if df.empty:
+        print(f"[skip] block size {block_size} not found for blocktime-vs-shards-per-target plot")
+        return
+
+    grouped = (
+        df.groupby(["blocktime_cfg", "shards_int"])["abt_val"]
+        .mean()
+        .reset_index()
+        .sort_values(["blocktime_cfg", "shards_int"])
+    )
+
+    all_targets = sorted(grouped["blocktime_cfg"].unique().tolist())
+    all_shards = sorted(grouped["shards_int"].unique().tolist())
+    x_positions = _x_positions(all_shards)
+
+    # Restricted to viridis's dark-purple-to-teal range (0.0-0.55) — the
+    # colormap's green/yellow tail is too light/low-contrast to read.
+    cmap = plt.cm.viridis
+    fig, ax = plt.subplots(figsize=(12, 7))
+    for i, bt in enumerate(all_targets):
+        row = grouped[grouped["blocktime_cfg"] == bt].sort_values("shards_int")
+        x_vals = [x_positions[s] for s in row["shards_int"]]
+        color = cmap(0.55 * i / max(1, len(all_targets) - 1))
+        ax.plot(x_vals, row["abt_val"], marker="o", linewidth=2, markersize=5,
+                color=color, label=_fmt_bt(bt), zorder=3)
+        ax.axhline(bt, color=color, linestyle=":", linewidth=1, alpha=0.6, zorder=1)
+
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Block Time (s)", fontsize=LABEL_FS)
+    ax.set_title(
+        f"Actual (solid) vs Configured (dotted) Block Time vs Number of Shards "
+        f"(Block Size = {block_size:,})", fontsize=TITLE_FS,
+    )
+    ax.set_xticks([x_positions[s] for s in all_shards])
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
+    ax.set_yscale("log")
+    ax.legend(title="Configured Target", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
+              ncol=2, loc="upper right")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+
+    out_name = f"network_blocktime_vs_shards_per_target_bs{block_size}.png"
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def run_protocol_messages_vs_shards(network_csv: str, outdir: str, show: bool, conflict_check: str = None):
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
     if df is None:
         print(f"[skip] messages-vs-shards: no usable data in {network_csv}")
         return
@@ -222,8 +540,8 @@ def run_protocol_messages_vs_shards(network_csv: str, outdir: str, show: bool):
     )
 
 
-def run_protocol_rounds_vs_shards(network_csv: str, outdir: str, show: bool, percentile: str = "hop_p50"):
-    df = _load_network_csv(network_csv)
+def run_protocol_rounds_vs_shards(network_csv: str, outdir: str, show: bool, percentile: str = "hop_p50", conflict_check: str = None):
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
     if df is None or df[percentile].isna().all():
         print(f"[skip] rounds-vs-shards: no usable {percentile} data in {network_csv}")
         return
@@ -236,8 +554,8 @@ def run_protocol_rounds_vs_shards(network_csv: str, outdir: str, show: bool, per
     )
 
 
-def run_protocol_broadcast_cpu_vs_shards(network_csv: str, outdir: str, show: bool):
-    df = _load_network_csv(network_csv)
+def run_protocol_broadcast_cpu_vs_shards(network_csv: str, outdir: str, show: bool, conflict_check: str = None):
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
     if df is None or df["broadcast_cpu_seconds"].isna().all():
         print(f"[skip] broadcast-cpu-vs-shards: no usable broadcast_cpu_seconds data in {network_csv}")
         return
@@ -253,8 +571,9 @@ def run_protocol_broadcast_cpu_vs_shards(network_csv: str, outdir: str, show: bo
 # Shard-communication comparison: kademlia vs direct, one metric vs shards
 # ----------------------------
 def run_shard_comm_comparison(network_csv: str, outdir: str, show: bool,
-                               metric: str = "abt_val", ylabel: str = "Min Actual Block Time (s)"):
-    df = _load_network_csv(network_csv)
+                               metric: str = "abt_val", ylabel: str = "Min Actual Block Time (s)",
+                               conflict_check: str = None):
+    df = _load_network_csv(network_csv, conflict_check=conflict_check)
     if df is None:
         print(f"[skip] shard-comm comparison: no usable data in {network_csv}")
         return
@@ -276,17 +595,224 @@ def run_shard_comm_comparison(network_csv: str, outdir: str, show: bool,
         x_vals = [x_positions[s] for s in row["shards_int"]]
         ax.plot(x_vals, row[metric], marker="o", linewidth=2, markersize=5, label=scomm)
 
-    ax.set_xlabel("Number of Shards", fontsize=13)
-    ax.set_ylabel(ylabel, fontsize=13)
-    ax.set_title(f"Shard Communication Protocol Comparison: {ylabel} vs Number of Shards", fontsize=14)
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel(ylabel, fontsize=LABEL_FS)
+    ax.set_title(f"Shard Communication Protocol Comparison: {ylabel} vs Number of Shards", fontsize=TITLE_FS)
     ax.set_xticks([x_positions[s] for s in all_shards])
     ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
     ax.set_yscale("log")
-    ax.legend(title="Shard Comm Protocol", fontsize=9, title_fontsize=10)
+    ax.legend(title="Shard Comm Protocol", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
 
     out_name = f"network_shard_comm_{metric}.png"
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ----------------------------
+# Common: Messages vs Shards / Messages vs Neighbors across all 3 network
+# environments (Datacenter, US WAN, Global WAN) — one line per environment
+# on a single graph, matching the run_common_* pattern in graph.py.
+# ----------------------------
+
+# linestyle/marker/linewidth are set to still read as 3 distinct series even
+# when the underlying values coincide exactly (as with `messages`, which is
+# latency-independent) — drawn thickest-to-thinnest, bottom-to-top, so each
+# ring peeks out from behind the next.
+_ENV_CONFIGS = [
+    # label,        env,      color,      linestyle, marker, linewidth, markersize, zorder
+    ("Datacenter", "local",  "#1f77b4", "-",  "o", 6.0, 12, 1),
+    ("US WAN",     "usa",    "#ff7f0e", "--", "s", 3.5, 8,  2),
+    ("Global WAN", "global", "#2ca02c", ":",  "^", 1.8, 5,  3),
+]
+
+
+def run_common_network_blocktime_vs_shards(local_csv: str, usa_csv: str, global_csv: str,
+                                            outdir: str, show: bool, block_size: int = None,
+                                            conflict_check: str = None):
+    csv_by_env = {"local": local_csv, "usa": usa_csv, "global": global_csv}
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    all_shards = None
+
+    for label, env, color, linestyle, marker, linewidth, markersize, zorder in _ENV_CONFIGS:
+        df = _load_network_csv(csv_by_env[env], conflict_check=conflict_check)
+        if df is None:
+            print(f"[skip] {label}: no usable data in {csv_by_env[env]}")
+            continue
+
+        if block_size is not None:
+            available = sorted(df["block_size_int"].unique().tolist())
+            if block_size not in available:
+                print(f"[skip] {label}: block size {block_size} not found. Available: {available}")
+                continue
+            df = df[df["block_size_int"] == block_size]
+
+        agg = (
+            df.groupby("shards_int")["abt_val"]
+            .min()
+            .reset_index()
+            .sort_values("shards_int")
+        )
+
+        if all_shards is None:
+            all_shards = sorted(agg["shards_int"].unique().tolist())
+
+        x_positions = _x_positions(sorted(agg["shards_int"].unique().tolist()))
+        x_vals = [x_positions[s] for s in agg["shards_int"]]
+
+        ax.plot(x_vals, agg["abt_val"], marker=marker, linestyle=linestyle,
+                linewidth=linewidth, markersize=markersize, label=label,
+                color=color, zorder=zorder, markeredgecolor="white", markeredgewidth=0.6)
+
+    if all_shards is None:
+        print("[skip] common network blocktime-vs-shards graph: no data plotted")
+        plt.close(fig)
+        return
+
+    x_positions_global = _x_positions(all_shards)
+    xticks = [x_positions_global[s] for s in all_shards]
+
+    title_suffix = f" (Block Size = {block_size:,})" if block_size is not None else " (All Block Sizes — Min)"
+    out_name = (
+        f"common_network_blocktime_vs_shards_bs{block_size}.png"
+        if block_size is not None
+        else "common_network_blocktime_vs_shards.png"
+    )
+
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Min Actual Block Time (s)", fontsize=LABEL_FS)
+    ax.set_title(f"Network Protocol Sweep: Min Block Time vs Number of Shards{title_suffix}", fontsize=TITLE_FS)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
+    ax.set_yscale("log")
+    ax.legend(title="Network Environment", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def run_common_messages_vs_shards(local_csv: str, usa_csv: str, global_csv: str,
+                                   outdir: str, show: bool, conflict_check: str = None):
+    csv_by_env = {"local": local_csv, "usa": usa_csv, "global": global_csv}
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    all_shards = None
+
+    for label, env, color, linestyle, marker, linewidth, markersize, zorder in _ENV_CONFIGS:
+        df = _load_network_csv(csv_by_env[env], conflict_check=conflict_check)
+        if df is None:
+            print(f"[skip] {label}: no usable data in {csv_by_env[env]}")
+            continue
+
+        agg = (
+            df.groupby("shards_int")["messages_val"]
+            .mean()
+            .reset_index()
+            .sort_values("shards_int")
+        )
+
+        if all_shards is None:
+            all_shards = sorted(agg["shards_int"].unique().tolist())
+
+        x_positions = _x_positions(sorted(agg["shards_int"].unique().tolist()))
+        x_vals = [x_positions[s] for s in agg["shards_int"]]
+
+        ax.plot(x_vals, agg["messages_val"], marker=marker, linestyle=linestyle,
+                linewidth=linewidth, markersize=markersize, label=label,
+                color=color, zorder=zorder, markeredgecolor="white", markeredgewidth=0.6)
+
+    if all_shards is None:
+        print("[skip] common messages-vs-shards graph: no data plotted")
+        plt.close(fig)
+        return
+
+    x_positions_global = _x_positions(all_shards)
+    xticks = [x_positions_global[s] for s in all_shards]
+
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Messages", fontsize=LABEL_FS)
+    ax.set_title("Messages vs Number of Shards (Datacenter vs US WAN vs Global WAN)", fontsize=TITLE_FS)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
+    ax.set_yscale("log")
+    ax.legend(title="Network Environment", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    out_name = "common_messages_vs_shards.png"
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def run_common_messages_vs_neighbors(local_csv: str, usa_csv: str, global_csv: str,
+                                      outdir: str, show: bool):
+    csv_by_env = {"local": local_csv, "usa": usa_csv, "global": global_csv}
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    all_neighbors = None
+
+    for label, env, color, linestyle, marker, linewidth, markersize, zorder in _ENV_CONFIGS:
+        df = _load_fanout_csv(csv_by_env[env])
+        if df is None:
+            print(f"[skip] {label}: no usable data in {csv_by_env[env]}")
+            continue
+
+        agg = (
+            df.groupby("neighbors_int")["messages_val"]
+            .mean()
+            .reset_index()
+            .sort_values("neighbors_int")
+        )
+
+        if all_neighbors is None:
+            all_neighbors = sorted(agg["neighbors_int"].unique().tolist())
+
+        x_positions = _x_positions(sorted(agg["neighbors_int"].unique().tolist()))
+        x_vals = [x_positions[n] for n in agg["neighbors_int"]]
+
+        ax.plot(x_vals, agg["messages_val"], marker=marker, linestyle=linestyle,
+                linewidth=linewidth, markersize=markersize, label=label,
+                color=color, zorder=zorder, markeredgecolor="white", markeredgewidth=0.6)
+
+    if all_neighbors is None:
+        print("[skip] common messages-vs-neighbors graph: no data plotted")
+        plt.close(fig)
+        return
+
+    x_positions_global = _x_positions(all_neighbors)
+    xticks = [x_positions_global[n] for n in all_neighbors]
+
+    ax.set_xlabel("Neighbors = Gossip Fanout", fontsize=LABEL_FS)
+    ax.set_ylabel("Messages", fontsize=LABEL_FS)
+    ax.set_title("Messages vs Neighbors / Gossip Fanout (Datacenter vs US WAN vs Global WAN)", fontsize=TITLE_FS)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(n) for n in all_neighbors], rotation=45, ha="right")
+    ax.tick_params(labelsize=TICK_FS)
+    ax.set_yscale("log")
+    ax.legend(title="Network Environment", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    out_name = "common_messages_vs_neighbors.png"
     savefig(outdir, out_name)
     print(f"[done] {os.path.join(outdir, out_name)}")
     if show:
@@ -336,12 +862,13 @@ def run_hop_cdf_overlay(hopcdf_dir: str, outdir: str, show: bool):
 
     ax.axhline(0.5, linestyle="--", alpha=0.3, color="gray")
     ax.axhline(0.9, linestyle="--", alpha=0.3, color="gray")
-    ax.set_xlabel("Hop count", fontsize=13)
-    ax.set_ylabel("Fraction of network informed", fontsize=13)
-    ax.set_title("Hop-Count CDF by Broadcast Protocol (reference config)", fontsize=13)
+    ax.set_xlabel("Hop count", fontsize=LABEL_FS)
+    ax.set_ylabel("Fraction of network informed", fontsize=LABEL_FS)
+    ax.set_title("Hop-Count CDF by Broadcast Protocol (reference config)", fontsize=TITLE_FS)
     ax.set_ylim(0, 1.02)
     ax.set_xlim(left=0)
-    ax.legend(title="Protocol", fontsize=9, title_fontsize=10)
+    ax.tick_params(labelsize=TICK_FS)
+    ax.legend(title="Protocol", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
     ax.grid(True, linestyle="--", alpha=0.35)
     fig.tight_layout()
 
@@ -397,12 +924,13 @@ def run_rounds_messages_per_block(perblock_dir: str, outdir: str, show: bool):
         for label, (bprot, df) in series.items():
             ax.plot(df["block"], df[metric], linewidth=1.5, label=label,
                     color=PROTOCOL_COLORS.get(bprot))
-        ax.set_xlabel("Block number", fontsize=13)
-        ax.set_ylabel(ylabel, fontsize=13)
-        ax.set_title(f"{ylabel} vs Block Number (per-block, reference config)", fontsize=14)
+        ax.set_xlabel("Block number", fontsize=LABEL_FS)
+        ax.set_ylabel(ylabel, fontsize=LABEL_FS)
+        ax.set_title(f"{ylabel} vs Block Number (per-block, reference config)", fontsize=TITLE_FS)
+        ax.tick_params(labelsize=TICK_FS)
         if log_y:
             ax.set_yscale("log")
-        ax.legend(title="Protocol", fontsize=9, title_fontsize=10)
+        ax.legend(title="Protocol", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
         ax.grid(True, linestyle="--", alpha=0.4)
         fig.tight_layout()
 
@@ -440,8 +968,20 @@ def main():
 
     ap.add_argument("--bt_blocksize", type=int, default=None,
                     help="If set, filter blocktime-vs-shards plot to this block size")
+    ap.add_argument("--bt_per_target_blocksize", type=int, default=524288,
+                    help="Block size for the per-target actual-vs-configured "
+                         "blocktime-vs-shards plot (one line per configured "
+                         "target, not collapsed to the min) — explains every "
+                         "legend label in the TPS-vs-shards-per-blocksize panel "
+                         "for that block size, not just the fastest one")
+    ap.add_argument("--skip_blocktime_per_target", action="store_true")
+    ap.add_argument("--conflict_check", default="nonce_hash_set",
+                    help="Filter all protocol-comparison plots to this conflict_check method "
+                         "(the CSV rows contain both nonce_hash_set and radix_sort runs per "
+                         "shards/block_size; set to '' / none to disable and average across both)")
 
     ap.add_argument("--skip_tps", action="store_true")
+    ap.add_argument("--skip_tps_per_blocksize", action="store_true")
     ap.add_argument("--skip_blocktime", action="store_true")
     ap.add_argument("--skip_messages", action="store_true")
     ap.add_argument("--skip_broadcast_cpu", action="store_true")
@@ -453,8 +993,30 @@ def main():
                     help="Which hop-count percentile to plot as 'rounds' vs shards")
     ap.add_argument("--skip_perblock", action="store_true")
 
+    ap.add_argument("--fanout_csv", default="fanout_neighbors_results_local.csv",
+                    help="CSV written by Parallel_processes/fanout_neighbors_parallel.py")
+    ap.add_argument("--fanout_out", default=None,
+                    help="Output folder for the neighbors/fanout plots (default: same as --network_out)")
+    ap.add_argument("--skip_fanout_tps", action="store_true")
+    ap.add_argument("--skip_fanout_messages", action="store_true")
+
+    ap.add_argument("--common_out", default="common_graphs",
+                    help="Output folder for cross-environment (Datacenter/US WAN/Global WAN) comparison graphs")
+    ap.add_argument("--network_local_csv", default="network_results_local.csv")
+    ap.add_argument("--network_usa_csv", default="network_results_usa.csv")
+    ap.add_argument("--network_global_csv", default="network_results_global.csv")
+    ap.add_argument("--fanout_local_csv", default="fanout_neighbors_results_local.csv")
+    ap.add_argument("--fanout_usa_csv", default="fanout_neighbors_results_usa.csv")
+    ap.add_argument("--fanout_global_csv", default="fanout_neighbors_results_global.csv")
+    ap.add_argument("--skip_common_messages_shards", action="store_true")
+    ap.add_argument("--skip_common_messages_neighbors", action="store_true")
+    ap.add_argument("--skip_common_network_blocktime", action="store_true")
+    ap.add_argument("--common_network_bt_blocksize", type=int, default=None,
+                    help="If set, filter common network blocktime-vs-shards graph to this block size")
+
     args = ap.parse_args()
     show = not args.no_show
+    conflict_check = args.conflict_check or None
 
     network_csv = os.path.join(args.results_dir, args.network_csv)
     hopcdf_dir  = args.hopcdf_dir or os.path.join(args.results_dir, "network_runs", "hopcdf")
@@ -463,21 +1025,55 @@ def main():
     perblock_out = args.perblock_out or args.network_out
 
     if not args.skip_tps:
-        run_protocol_tps_vs_shards(network_csv, args.network_out, show=show)
+        run_protocol_tps_vs_shards(network_csv, args.network_out, show=show, conflict_check=conflict_check)
+    if not args.skip_tps_per_blocksize:
+        run_tps_vs_shards_per_blocksize(network_csv, args.network_out, show=show, conflict_check=conflict_check)
     if not args.skip_blocktime:
-        run_protocol_blocktime_vs_shards(network_csv, args.network_out, show=show, block_size=args.bt_blocksize)
+        run_protocol_blocktime_vs_shards(network_csv, args.network_out, show=show, block_size=args.bt_blocksize, conflict_check=conflict_check)
+    if not args.skip_blocktime_per_target:
+        run_blocktime_vs_shards_per_target(network_csv, args.network_out, show=show, block_size=args.bt_per_target_blocksize, conflict_check=conflict_check)
     if not args.skip_messages:
-        run_protocol_messages_vs_shards(network_csv, args.network_out, show=show)
+        run_protocol_messages_vs_shards(network_csv, args.network_out, show=show, conflict_check=conflict_check)
     if not args.skip_broadcast_cpu:
-        run_protocol_broadcast_cpu_vs_shards(network_csv, args.network_out, show=show)
+        run_protocol_broadcast_cpu_vs_shards(network_csv, args.network_out, show=show, conflict_check=conflict_check)
     if not args.skip_shard_comm:
-        run_shard_comm_comparison(network_csv, args.network_out, show=show)
+        run_shard_comm_comparison(network_csv, args.network_out, show=show, conflict_check=conflict_check)
     if not args.skip_hop_cdf:
         run_hop_cdf_overlay(hopcdf_dir, hopcdf_out, show=show)
     if not args.skip_rounds:
-        run_protocol_rounds_vs_shards(network_csv, args.network_out, show=show, percentile=args.rounds_percentile)
+        run_protocol_rounds_vs_shards(network_csv, args.network_out, show=show, percentile=args.rounds_percentile, conflict_check=conflict_check)
     if not args.skip_perblock:
         run_rounds_messages_per_block(perblock_dir, perblock_out, show=show)
+
+    fanout_csv = os.path.join(args.results_dir, args.fanout_csv)
+    fanout_out = args.fanout_out or args.network_out
+    if not args.skip_fanout_tps:
+        run_tps_vs_neighbors(fanout_csv, fanout_out, show=show)
+    if not args.skip_fanout_messages:
+        run_messages_vs_neighbors(fanout_csv, fanout_out, show=show)
+
+    if not args.skip_common_network_blocktime:
+        run_common_network_blocktime_vs_shards(
+            os.path.join(args.results_dir, args.network_local_csv),
+            os.path.join(args.results_dir, args.network_usa_csv),
+            os.path.join(args.results_dir, args.network_global_csv),
+            outdir=args.common_out, show=show,
+            block_size=args.common_network_bt_blocksize, conflict_check=conflict_check,
+        )
+    if not args.skip_common_messages_shards:
+        run_common_messages_vs_shards(
+            os.path.join(args.results_dir, args.network_local_csv),
+            os.path.join(args.results_dir, args.network_usa_csv),
+            os.path.join(args.results_dir, args.network_global_csv),
+            outdir=args.common_out, show=show, conflict_check=conflict_check,
+        )
+    if not args.skip_common_messages_neighbors:
+        run_common_messages_vs_neighbors(
+            os.path.join(args.results_dir, args.fanout_local_csv),
+            os.path.join(args.results_dir, args.fanout_usa_csv),
+            os.path.join(args.results_dir, args.fanout_global_csv),
+            outdir=args.common_out, show=show,
+        )
 
 
 if __name__ == "__main__":

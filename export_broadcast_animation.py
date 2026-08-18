@@ -103,7 +103,7 @@ def export_plumtree(adjacency, node_list, edges, args) -> Dict:
     for b in range(args.blocks):
         source = random.randrange(args.nodes)
         events: List[dict] = []
-        rounds, eager, lazy, prunes, grafts, coverage, first_seen = simulate_adaptive_plumtree(
+        rounds, eager, lazy, prunes, grafts, coverage, first_seen, _per_round_max_bytes = simulate_adaptive_plumtree(
             source, adjacency, link_state, args.plumtree_lazy_fanout,
             ttl=args.hop_ttl, events=events)
         blocks.append({
