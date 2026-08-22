@@ -85,10 +85,12 @@ def load_csv(csv_path: str):
     return df.sort_values(["n", "algorithm"])
 
 
-def plot_phase_by_algorithm(df: pd.DataFrame, col: str, title: str, outdir: str, show: bool):
+def plot_phase_by_algorithm(df: pd.DataFrame, col: str, title: str, outdir: str, show: bool,
+                             algo_order=None, out_name=None):
     means = df.groupby(["algorithm", "n"], as_index=False)[col].mean()
 
-    algos = [a for a in ALGO_ORDER if means.loc[means["algorithm"] == a, col].sum() > 0]
+    order = algo_order if algo_order is not None else ALGO_ORDER
+    algos = [a for a in order if means.loc[means["algorithm"] == a, col].sum() > 0]
     if not algos:
         print(f"[skip] no algorithm has nonzero {col}")
         return
@@ -97,22 +99,27 @@ def plot_phase_by_algorithm(df: pd.DataFrame, col: str, title: str, outdir: str,
     x = np.arange(len(n_values))
     width = 0.8 / len(algos)
 
-    fig, ax = plt.subplots(figsize=(16, 6))
+    fig, ax = plt.subplots(figsize=(18, 8))
     for i, algo in enumerate(algos):
         sub = means[means["algorithm"] == algo].set_index("n").reindex(n_values)
         offset = (i - (len(algos) - 1) / 2) * width
         ax.bar(x + offset, sub[col].values, width, label=algo, color=ALGO_COLORS.get(algo))
 
     ax.set_xticks(x)
-    ax.set_xticklabels([str(n) for n in n_values], rotation=45, ha="right")
+    ax.set_xticklabels([str(n) for n in n_values], rotation=45, ha="right",
+                        fontsize=18, fontweight="bold")
     ax.set_yscale("log")
-    ax.set_xlabel("n (transactions per block)", fontsize=13)
-    ax.set_ylabel("Time (ms, mean of 10 runs)", fontsize=13)
-    ax.set_title(title, fontsize=14)
-    ax.legend(fontsize=9)
+    ax.set_xlabel("n (transactions per block / shard)", fontsize=22, fontweight="bold")
+    ax.set_ylabel("Time (ms, mean of 10 runs)", fontsize=22, fontweight="bold")
+    ax.set_title(title, fontsize=26, fontweight="bold")
+    ax.tick_params(axis="y", labelsize=18)
+    for label in ax.get_yticklabels():
+        label.set_fontweight("bold")
+    ax.legend(prop={"weight": "bold", "size": 20})
     ax.grid(True, which="both", axis="y", linestyle="--", alpha=0.4)
 
-    out_name = f"{col}_by_algorithm.png"
+    if out_name is None:
+        out_name = f"{col}_by_algorithm.png"
     savefig(outdir, out_name)
     print(f"[done] {os.path.join(outdir, out_name)}")
     plt.show() if show else plt.close(fig)
@@ -134,6 +141,18 @@ def main():
 
     for col, title in PHASES:
         plot_phase_by_algorithm(df, col, title, args.outdir, show)
+
+    plot_phase_by_algorithm(
+        df, "total_ms", "Total time by algorithm (nonce check only)", args.outdir, show,
+        algo_order=["nonce_hash_set", "nonce_sort_scan"],
+        out_name="total_ms_nonce_only.png",
+    )
+
+    plot_phase_by_algorithm(
+        df, "total_ms", "Total time by algorithm (hash set vs. sort/scan)", args.outdir, show,
+        algo_order=["hash_set", "nonce_hash_set", "sort_scan"],
+        out_name="total_ms_hash_vs_sort.png",
+    )
 
 
 if __name__ == "__main__":
