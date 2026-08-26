@@ -28,6 +28,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 
+# Bumped up across the board so nothing reads as too small in the paper —
+# matches graph_network.py's scheme, sized up further since these defaulted
+# to matplotlib's small default sizes (or no explicit size at all) before.
+TITLE_FS        = 18
+SUPTITLE_FS     = 20
+LABEL_FS        = 16
+TICK_FS         = 14
+LEGEND_FS       = 13
+LEGEND_TITLE_FS = 14
+ANNOT_FS        = 13
+
 
 # ----------------------------
 # Utilities
@@ -105,30 +116,32 @@ def run_validation(validation_csv: str, outdir: str, show: bool):
 
     labels = comparison["name"].tolist()
     x = np.arange(len(labels))
-    width = 0.35
+    width = 0.2
 
-    plt.figure(figsize=(7, 4))
+    plt.figure(figsize=(7, 3.2))
     plt.bar(x - width / 2, comparison["sim_tps"].tolist(), width, label="Simulated TPS")
     plt.bar(x + width / 2, comparison["real_tps"].tolist(), width, label="Claimed TPS")
-    plt.xticks(x, labels)
-    plt.ylabel("Transactions per second")
-    plt.title("TPS: Simulator vs Real-world")
+    plt.xticks(x, labels, fontsize=TICK_FS)
+    plt.yticks(fontsize=TICK_FS)
+    plt.ylabel("Transactions per second", fontsize=LABEL_FS)
+    plt.title("TPS: Simulator vs Real-world", fontsize=TITLE_FS)
     plt.grid(axis="y", linestyle="--", alpha=0.4)
-    plt.legend()
+    plt.legend(fontsize=LEGEND_FS)
     savefig(outdir, "validation_tps_comparison.png")
     if show:
         plt.show()
     else:
         plt.close()
 
-    plt.figure(figsize=(7, 4))
+    plt.figure(figsize=(7, 3.2))
     plt.bar(x - width / 2, comparison["sim_avg_block_time"].tolist(), width, label="Simulated Avg Block Time")
     plt.bar(x + width / 2, comparison["real_avg_block_time"].tolist(), width, label="Claimed Block Time")
-    plt.xticks(x, labels)
-    plt.ylabel("Average block time (seconds)")
-    plt.title("Block Time: Simulator vs Real-world")
+    plt.xticks(x, labels, fontsize=TICK_FS)
+    plt.yticks(fontsize=TICK_FS)
+    plt.ylabel("Average block time (seconds)", fontsize=LABEL_FS)
+    plt.title("Block Time: Simulator vs Real-world", fontsize=TITLE_FS)
     plt.grid(axis="y", linestyle="--", alpha=0.4)
-    plt.legend()
+    plt.legend(fontsize=LEGEND_FS)
     savefig(outdir, "validation_blocktime_comparison.png")
     if show:
         plt.show()
@@ -241,9 +254,9 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
     ax.set_ylim(y_edges[0], y_edges[-1])
 
     ax.set_xticks(range(n_x))
-    ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=16)
+    ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=TICK_FS)
     ax.set_yticks(range(n_y))
-    ax.set_yticklabels([f"{k:.0f}s" for k in bt_cfg_keys], fontsize=16)
+    ax.set_yticklabels([f"{k:.0f}s" for k in bt_cfg_keys], fontsize=TICK_FS)
 
     for i in range(n_y):
         for j in range(n_x):
@@ -258,16 +271,16 @@ def run_bubble_nonsharded_vs_memo_s1(non_csv: str, memo_csv: str, outdir: str, s
             else:
                 color = "black" if lum > 0.45 else "white"
             ax.text(j, i, tps_str, ha="center", va="center",
-                    fontsize=12, color=color, fontweight="bold",
+                    fontsize=ANNOT_FS, color=color, fontweight="bold",
                     fontstyle="italic" if was_nan[i, j] else "normal")
 
-    ax.set_xlabel("Block Size (tx/block)", fontsize=17)
-    ax.set_ylabel("Configured Mining Time (s)", fontsize=17)
-    ax.set_title("TPS Heatmap — BTC Hypothetical (Non-Sharded)", fontsize=18)
+    ax.set_xlabel("Block Size (tx/block)", fontsize=LABEL_FS)
+    ax.set_ylabel("Configured Mining Time (s)", fontsize=LABEL_FS)
+    ax.set_title("TPS Heatmap — BTC Hypothetical (Non-Sharded)", fontsize=TITLE_FS)
 
     cbar = plt.colorbar(im, ax=ax)
-    cbar.ax.tick_params(labelsize=13)
-    cbar.set_label("TPS", fontsize=17)
+    cbar.ax.tick_params(labelsize=TICK_FS)
+    cbar.set_label("TPS", fontsize=LABEL_FS)
 
     savefig(outdir, "heatmap_tps_blocktime_vs_blocksize_btc_hypothetical.png")
     if show:
@@ -335,9 +348,10 @@ def run_nonsharded_scatter(non_csv: str, outdir: str, show: bool):
     fig, ax = plt.subplots(figsize=(14, 7))
 
     cmap = plt.matplotlib.colors.LinearSegmentedColormap.from_list(
-        "red_to_skyblue", ["#990000", "#cc4400", "#cc9900", "#0077bb"]
+        "red_to_skyblue", ["#FA0000", "#11ff00"]
     )
-    norm = plt.Normalize(vmin=df["tps_val"].min(), vmax=df["tps_val"].max())
+    tps_min = df["tps_val"][df["tps_val"] > 0].min()
+    norm = plt.matplotlib.colors.LogNorm(vmin=tps_min, vmax=df["tps_val"].max())
 
     sc = ax.scatter(
         df["x"], df["abt"],
@@ -346,16 +360,17 @@ def run_nonsharded_scatter(non_csv: str, outdir: str, show: bool):
     )
 
     cbar = plt.colorbar(sc, ax=ax)
-    cbar.set_label("TPS", fontsize=13)
-    cbar.ax.tick_params(labelsize=11)
+    cbar.set_label("TPS", fontsize=LABEL_FS + 4)
+    cbar.ax.tick_params(labelsize=TICK_FS + 3)
 
     ax.set_yscale("log")
     ax.set_xticks(range(len(block_sizes)))
-    ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=11)
-    ax.set_xlabel("Block Size (tx/block)", fontsize=13)
-    ax.set_ylabel("Actual Mining Time (s)", fontsize=13)
+    ax.set_xticklabels([str(bs) for bs in block_sizes], rotation=45, ha="right", fontsize=TICK_FS + 3)
+    ax.tick_params(axis="y", labelsize=TICK_FS + 3)
+    ax.set_xlabel("Block Size (tx/block)", fontsize=LABEL_FS + 4)
+    ax.set_ylabel("Actual Mining Time (s)", fontsize=LABEL_FS + 4)
     ax.set_title("Non-Sharded TPS Scatter — BTC Hypothetical\n"
-                 "Each point = one simulation run; color = TPS", fontsize=13)
+                 "Each point = one simulation run; color = TPS", fontsize=TITLE_FS + 4)
     ax.grid(True, linestyle="--", alpha=0.35)
     fig.tight_layout()
 
@@ -443,12 +458,13 @@ def run_nonsharded_blocktime_vs_blocksize(non_csv: str, outdir: str, show: bool)
         ax.plot(x_vals, sub["abt"], marker="o", linewidth=1.8, markersize=5,
                 label=label, color=color, linestyle=linestyle)
 
-    ax.set_xlabel("Block Size (tx/block)", fontsize=13)
-    ax.set_ylabel("Actual Avg Block Time (s)", fontsize=13)
-    ax.set_title("Non-Sharded: Actual Mining Time vs Block Size (BTC Hypothetical)", fontsize=14)
+    ax.set_xlabel("Block Size (tx/block)", fontsize=LABEL_FS)
+    ax.set_ylabel("Actual Avg Block Time (s)", fontsize=LABEL_FS)
+    ax.set_title("Non-Sharded: Actual Mining Time vs Block Size (BTC Hypothetical)", fontsize=TITLE_FS)
     ax.set_xticks(xticks)
-    ax.set_xticklabels(xticklabels, rotation=45, ha="right")
-    ax.legend(title="Configured\nMining Time", fontsize=9, title_fontsize=9,
+    ax.set_xticklabels(xticklabels, rotation=45, ha="right", fontsize=TICK_FS)
+    ax.tick_params(axis="y", labelsize=TICK_FS)
+    ax.legend(title="Configured\nMining Time", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
               loc="upper right", ncol=2)
     ax.set_yscale("log")
     ax.grid(True, linestyle="--", alpha=0.4)
@@ -599,14 +615,15 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt))
                 )
 
-            ax.set_title(f"Block Size = {bs:,}")
-            ax.set_xlabel("Number of Shards")
+            ax.set_title(f"Block Size = {bs:,}", fontsize=TITLE_FS)
+            ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
             ax.set_xticks(xticks)
-            ax.set_xticklabels(xticklabels)
+            ax.set_xticklabels(xticklabels, fontsize=TICK_FS)
+            ax.tick_params(axis="y", labelsize=TICK_FS)
             ax.grid(True, linestyle="--", alpha=0.35)
 
             if i % cols == 0:
-                ax.set_ylabel("TPS")
+                ax.set_ylabel("TPS", fontsize=LABEL_FS)
 
             if legend_handles is None:
                 legend_handles, legend_labels = ax.get_legend_handles_labels()
@@ -615,7 +632,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
         for j in range(len(bs_group), len(axes)):
             axes[j].axis("off")
 
-        fig.suptitle("New Sharded Design: TPS vs Number of Shards", fontsize=13)
+        fig.suptitle("New Sharded Design: TPS vs Number of Shards", fontsize=SUPTITLE_FS)
 
         # Reserve space at bottom for legend, top for suptitle
         fig.tight_layout(rect=[0, 0.10, 1, 0.95])
@@ -628,7 +645,7 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                 ncol=min(6, len(legend_labels)),
                 bbox_to_anchor=(0.5, 0.01),
                 frameon=True,
-                fontsize=8
+                fontsize=LEGEND_FS
             )
 
         safe_mkdir(outdir)
@@ -674,16 +691,17 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                     label=_fmt_bt(abt_at_max_shards.get((bs, bt), bt))
                 )
 
-            ax.set_title(f"BS={bs}")
-            ax.set_xlabel("Shards")
+            ax.set_title(f"BS={bs}", fontsize=TITLE_FS)
+            ax.set_xlabel("Shards", fontsize=LABEL_FS)
             ax.set_xticks(xticks)
-            ax.set_xticklabels(xticklabels)
+            ax.set_xticklabels(xticklabels, fontsize=TICK_FS)
+            ax.tick_params(axis="y", labelsize=TICK_FS)
             ax.grid(True, linestyle="--", alpha=0.35)
             ax.set_yscale("log")
             ax.set_ylim(bottom=1e-1)
 
             if i % cols == 0:
-                ax.set_ylabel("TPS")
+                ax.set_ylabel("TPS", fontsize=LABEL_FS)
 
             if legend_handles is None:
                 legend_handles, legend_labels = ax.get_legend_handles_labels()
@@ -698,10 +716,11 @@ def run_memo_per_blocksize(memo_csv: str, outdir: str, show: bool):
                 loc="upper center",
                 ncol=min(4, len(legend_labels)),
                 bbox_to_anchor=(0.5, 1.02),
-                frameon=True
+                frameon=True,
+                fontsize=LEGEND_FS
             )
 
-        fig.suptitle("New Sharded Design: TPS vs Number of Shards by Block Size and Blocktime", y=1.06, fontsize=13)
+        fig.suptitle("New Sharded Design: TPS vs Number of Shards by Block Size and Blocktime", y=1.06, fontsize=SUPTITLE_FS)
         savefig(outdir, "memo_tps_vs_shards_all_blocksizes.png")
 
         if show:
@@ -776,13 +795,14 @@ def run_memo_blocktime_vs_shards(memo_csv: str, outdir: str, show: bool, block_s
     title_suffix = f" (Block Size = {block_size:,})" if block_size is not None else ""
     out_name = f"memo_blocktime_vs_shards_bs{block_size}.png" if block_size is not None else "memo_blocktime_vs_shards.png"
 
-    ax.set_xlabel("Number of Shards", fontsize=13)
-    ax.set_ylabel("Min Actual Block Time (s)", fontsize=13)
-    ax.set_title(f"New Sharded Design: Min Block Time vs Number of Shards{title_suffix}", fontsize=14)
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Min Actual Block Time (s)", fontsize=LABEL_FS)
+    ax.set_title(f"New Sharded Design: Min Block Time vs Number of Shards{title_suffix}", fontsize=TITLE_FS)
     ax.set_xticks(xticks)
-    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right", fontsize=TICK_FS)
+    ax.tick_params(axis="y", labelsize=TICK_FS)
     ax.set_yscale("log")
-    ax.legend(title="Block Size", fontsize=8, title_fontsize=9,
+    ax.legend(title="Block Size", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
               loc="upper right", ncol=2)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
@@ -867,17 +887,18 @@ def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
             ax.plot(x_vals, sub["messages_val"], marker="o", linewidth=1.8,
                     markersize=4, color=cmap(idx), label=f"{bs:,}")
 
-        ax.legend(title="Block Size", fontsize=8, title_fontsize=9,
+        ax.legend(title="Block Size", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS,
                   loc="upper left", ncol=2)
 
     if all_same:
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=LEGEND_FS)
 
-    ax.set_xlabel("Number of Shards", fontsize=13)
-    ax.set_ylabel("Messages", fontsize=13)
-    ax.set_title("New Sharded Design: Messages vs Number of Shards", fontsize=14)
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Messages", fontsize=LABEL_FS)
+    ax.set_title("New Sharded Design: Messages vs Number of Shards", fontsize=TITLE_FS)
     ax.set_xticks(xticks)
-    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right")
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right", fontsize=TICK_FS)
+    ax.tick_params(axis="y", labelsize=TICK_FS)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
 
@@ -891,6 +912,222 @@ def run_memo_messages_vs_shards(memo_csv: str, outdir: str, show: bool):
         plt.close(fig)
 
     print(f"[done] {out_path}")
+
+
+# ----------------------------
+# 5) Common: Block Time vs Shards across all 3 network environments
+#    Three lines (datacenter, US WAN, global WAN) on one graph.
+#    Optional --common_bt_blocksize to filter to a single block size.
+# ----------------------------
+def run_common_blocktime_vs_shards(
+    local_csv: str,
+    usa_csv: str,
+    global_csv: str,
+    outdir: str,
+    show: bool,
+    block_size: int = None,
+):
+    configs = [
+        ("Datacenter",  local_csv,  "#1f77b4"),
+        ("US WAN",      usa_csv,    "#ff7f0e"),
+        ("Global WAN",  global_csv, "#2ca02c"),
+    ]
+
+    missing_files = [label for label, path, _ in configs if not os.path.exists(path)]
+    if missing_files:
+        print(f"[skip] common blocktime graph: missing CSVs for {missing_files}")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    all_shards = None
+
+    for label, csv_path, color in configs:
+        df = pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
+        df.columns = [str(c).strip() for c in df.columns]
+
+        c_shards = _pick_col(df, ["shards"])
+        c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
+        c_abt    = _pick_col(df, ["average block time_mean", "average block time",
+                                   "avg block time", "avg_block_time"])
+
+        if any(c is None for c in [c_shards, c_bs, c_abt]):
+            print(f"[skip] {label}: missing required columns in {csv_path}")
+            continue
+
+        for c in [c_shards, c_bs, c_abt]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=[c_shards, c_bs, c_abt]).copy()
+
+        df["shards_int"]     = df[c_shards].astype(int)
+        df["block_size_int"] = df[c_bs].astype(int)
+        df["abt_val"]        = df[c_abt].astype(float)
+
+        if block_size is not None:
+            available = sorted(df["block_size_int"].unique().tolist())
+            if block_size not in available:
+                print(f"[skip] {label}: block size {block_size} not found. Available: {available}")
+                continue
+            df = df[df["block_size_int"] == block_size].copy()
+
+        agg = (
+            df.groupby("shards_int")["abt_val"]
+            .min()
+            .reset_index()
+            .sort_values("shards_int")
+        )
+
+        if all_shards is None:
+            all_shards = sorted(agg["shards_int"].unique().tolist())
+
+        x_positions = {s: i * 2 for i, s in enumerate(
+            sorted(agg["shards_int"].unique().tolist())
+        )}
+        x_vals = [x_positions[s] for s in agg["shards_int"]]
+
+        ax.plot(x_vals, agg["abt_val"], marker="o", linewidth=2,
+                markersize=5, label=label, color=color)
+
+    if all_shards is None:
+        print("[skip] common blocktime graph: no data plotted")
+        plt.close(fig)
+        return
+
+    x_positions_global = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks = [x_positions_global[s] for s in all_shards]
+
+    title_suffix = f" (Block Size = {block_size:,})" if block_size is not None else " (All Block Sizes — Min)"
+    out_name = (
+        f"common_blocktime_vs_shards_bs{block_size}.png"
+        if block_size is not None
+        else "common_blocktime_vs_shards.png"
+    )
+
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Min Actual Block Time (s)", fontsize=LABEL_FS)
+    ax.set_title(f"Min Block Time vs Number of Shards{title_suffix}", fontsize=TITLE_FS)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right", fontsize=TICK_FS)
+    ax.tick_params(axis="y", labelsize=TICK_FS)
+    ax.set_yscale("log")
+    ax.legend(title="Network Environment", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ----------------------------
+# 5b) Common: Average TPS vs Shards across all 3 network environments
+#     Three lines (datacenter, US WAN, global WAN) on one graph.
+#     Optional --common_tps_blocksize to filter to a single block size.
+# ----------------------------
+def run_common_tps_vs_shards(
+    local_csv: str,
+    usa_csv: str,
+    global_csv: str,
+    outdir: str,
+    show: bool,
+    block_size: int = None,
+):
+    configs = [
+        ("Datacenter",  local_csv,  "#1f77b4"),
+        ("US WAN",      usa_csv,    "#ff7f0e"),
+        ("Global WAN",  global_csv, "#2ca02c"),
+    ]
+
+    missing_files = [label for label, path, _ in configs if not os.path.exists(path)]
+    if missing_files:
+        print(f"[skip] common tps graph: missing CSVs for {missing_files}")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    all_shards = None
+
+    for label, csv_path, color in configs:
+        df = pd.read_csv(csv_path, engine="python", on_bad_lines="warn")
+        df.columns = [str(c).strip() for c in df.columns]
+
+        c_shards = _pick_col(df, ["shards"])
+        c_bs     = _pick_col(df, ["block size", "block_size", "blocksize"])
+        c_tps    = _pick_col(df, ["tps_mean", "tps"])
+
+        if any(c is None for c in [c_shards, c_bs, c_tps]):
+            print(f"[skip] {label}: missing required columns in {csv_path}")
+            continue
+
+        for c in [c_shards, c_bs, c_tps]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=[c_shards, c_bs, c_tps]).copy()
+
+        df["shards_int"]     = df[c_shards].astype(int)
+        df["block_size_int"] = df[c_bs].astype(int)
+        df["tps_val"]        = df[c_tps].astype(float)
+
+        if block_size is not None:
+            available = sorted(df["block_size_int"].unique().tolist())
+            if block_size not in available:
+                print(f"[skip] {label}: block size {block_size} not found. Available: {available}")
+                continue
+            df = df[df["block_size_int"] == block_size].copy()
+
+        agg = (
+            df.groupby("shards_int")["tps_val"]
+            .mean()
+            .reset_index()
+            .sort_values("shards_int")
+        )
+
+        if all_shards is None:
+            all_shards = sorted(agg["shards_int"].unique().tolist())
+
+        x_positions = {s: i * 2 for i, s in enumerate(
+            sorted(agg["shards_int"].unique().tolist())
+        )}
+        x_vals = [x_positions[s] for s in agg["shards_int"]]
+
+        ax.plot(x_vals, agg["tps_val"], marker="o", linewidth=2,
+                markersize=5, label=label, color=color)
+
+    if all_shards is None:
+        print("[skip] common tps graph: no data plotted")
+        plt.close(fig)
+        return
+
+    x_positions_global = {s: i * 2 for i, s in enumerate(all_shards)}
+    xticks = [x_positions_global[s] for s in all_shards]
+
+    title_suffix = f" (Block Size = {block_size:,})" if block_size is not None else " (All Block Sizes — Mean)"
+    out_name = (
+        f"common_tps_vs_shards_bs{block_size}.png"
+        if block_size is not None
+        else "common_tps_vs_shards.png"
+    )
+
+    ax.set_xlabel("Number of Shards", fontsize=LABEL_FS)
+    ax.set_ylabel("Average TPS", fontsize=LABEL_FS)
+    ax.set_title(f"Average TPS vs Number of Shards{title_suffix}", fontsize=TITLE_FS)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(s) for s in all_shards], rotation=45, ha="right", fontsize=TICK_FS)
+    ax.tick_params(axis="y", labelsize=TICK_FS)
+    ax.legend(title="Network Environment", fontsize=LEGEND_FS, title_fontsize=LEGEND_TITLE_FS)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    savefig(outdir, out_name)
+    print(f"[done] {os.path.join(outdir, out_name)}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # ----------------------------
@@ -929,35 +1166,87 @@ def run_near_vs_targets(near_csv: str, outdir: str, show: bool):
 
     labels = [f"{int(s)} shards" for s in df_near["shards"]]
     x = np.arange(len(labels))
-    width = 0.35
+    width = 0.2
 
-    plt.figure(figsize=(7, 4))
+    plt.figure(figsize=(7, 3.2))
     plt.bar(x - width / 2, df_near["tps"].tolist(), width, label="Simulated TPS")
     plt.bar(x + width / 2, df_near["real_tps"].tolist(), width, label="Target NEAR TPS")
-    plt.xticks(x, labels)
-    plt.ylabel("Transactions per second")
-    plt.title("NEAR TPS: Simulator vs Target (by shard count)")
+    plt.xticks(x, labels, fontsize=TICK_FS)
+    plt.yticks(fontsize=TICK_FS)
+    plt.ylabel("Transactions per second", fontsize=LABEL_FS)
+    plt.title("NEAR TPS: Simulator vs Target (by shard count)", fontsize=TITLE_FS)
     plt.grid(axis="y", linestyle="--", alpha=0.4)
-    plt.legend()
+    plt.legend(fontsize=LEGEND_FS)
     savefig(outdir, "near_tps_comparison.png")
     if show:
         plt.show()
     else:
         plt.close()
 
-    plt.figure(figsize=(7, 4))
+    fig = plt.figure(figsize=(7, 3.4))
     plt.bar(x - width / 2, df_near["average block time"].tolist(), width, label="Simulated Avg Block Time")
     plt.bar(x + width / 2, df_near["real_avg_block_time"].tolist(), width, label="Target NEAR Block Time")
-    plt.xticks(x, labels)
-    plt.ylabel("Average block time (seconds)")
-    plt.title("NEAR Block Time: Simulator vs Target (by shard count)")
+    plt.xticks(x, labels, fontsize=TICK_FS)
+    plt.yticks(fontsize=TICK_FS)
+    plt.ylabel("Average block time (seconds)", fontsize=LABEL_FS)
+    plt.title("NEAR Block Time: Simulator vs Target (by shard count)", fontsize=TITLE_FS)
     plt.grid(axis="y", linestyle="--", alpha=0.4)
-    plt.legend()
-    savefig(outdir, "near_blocktime_comparison.png")
+    # All three bar groups are near-identical height here, so there's no
+    # empty space inside the axes for an inline legend — put it below the
+    # x-axis via a figure-level legend instead (fig.tight_layout's rect
+    # reserves the room), which plays nicer with tight_layout than an
+    # axes-level legend placed outside via bbox_to_anchor.
+    handles, legend_labels = plt.gca().get_legend_handles_labels()
+    fig.legend(handles, legend_labels, fontsize=LEGEND_FS, loc="lower center", ncol=2, bbox_to_anchor=(0.5, 0.0))
+    fig.tight_layout(rect=[0, 0.14, 1, 1])
+    safe_mkdir(outdir)
+    fig.savefig(os.path.join(outdir, "near_blocktime_comparison.png"), dpi=300, bbox_inches="tight")
     if show:
         plt.show()
     else:
         plt.close()
+
+
+# ----------------------------
+# 7) Hop-count CDF -> given outdir (from simulation.py's write_hop_cdf())
+# ----------------------------
+def run_hop_cdf(hop_cdf_csv: str, outdir: str, show: bool):
+    if not os.path.exists(hop_cdf_csv):
+        print(f"[skip] hop-count CDF CSV not found: {hop_cdf_csv}")
+        return
+
+    df = pd.read_csv(hop_cdf_csv)
+    if "hop_count" not in df.columns or "cumulative_fraction" not in df.columns:
+        print(f"[skip] {hop_cdf_csv} missing hop_count/cumulative_fraction columns")
+        return
+
+    df = ensure_numeric(df, ["hop_count", "cumulative_fraction"]).dropna()
+    df = df.sort_values("hop_count")
+    if df.empty:
+        print(f"[skip] {hop_cdf_csv} has no usable rows")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.step(df["hop_count"], df["cumulative_fraction"], where="post",
+            linewidth=2, color="#1f77b4")
+    ax.axhline(0.5, linestyle="--", alpha=0.3, color="gray")
+    ax.axhline(0.9, linestyle="--", alpha=0.3, color="gray")
+
+    ax.set_xlabel("Hop count", fontsize=LABEL_FS)
+    ax.set_ylabel("Fraction of network informed", fontsize=LABEL_FS)
+    ax.set_title("Hop-Count CDF — Broadcast Delivery by Hop", fontsize=TITLE_FS)
+    ax.tick_params(labelsize=TICK_FS)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+    ax.set_ylim(0, 1.02)
+    ax.set_xlim(left=0)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+
+    savefig(outdir, "hop_cdf.png")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # ----------------------------
@@ -995,6 +1284,25 @@ def main():
     ap.add_argument("--memo_bt_blocksize", type=int, default=None,
                     help="If set, only plot this block size in the blocktime vs shards graph")
 
+    ap.add_argument("--common_out", default="common_graphs",
+                    help="Output folder for cross-environment comparison graphs")
+    ap.add_argument("--memo_local_csv", default="memo_results_local.csv")
+    ap.add_argument("--memo_usa_csv",   default="memo_results_usa.csv")
+    ap.add_argument("--memo_global_csv", default="memo_results_global.csv")
+    ap.add_argument("--common_tps_blocksize", type=int, default=None,
+                    help="If set, filter common tps-vs-shards plot to this block size")
+    ap.add_argument("--common_bt_blocksize", type=int, default=None,
+                    help="If set, filter common blocktime-vs-shards graph to this block size")
+    ap.add_argument("--skip_common", action="store_true",
+                    help="Skip common cross-environment graphs")
+
+    ap.add_argument("--hop_cdf_csv", default="hop_cdf.csv",
+                    help="Hop-count CDF CSV written by simulation.py's write_hop_cdf()")
+    ap.add_argument("--hop_cdf_out", default="hop_cdf_graphs",
+                    help="Output folder for the hop-count CDF plot")
+    ap.add_argument("--skip_hop_cdf", action="store_true",
+                    help="Skip the hop-count CDF plot")
+
     args = ap.parse_args()
     show = not args.no_show
 
@@ -1026,6 +1334,27 @@ def main():
 
     if not args.skip_validation:
         run_validation(val_csv, args.val_out, show=show)
+
+    if not args.skip_hop_cdf:
+        hop_cdf_csv = os.path.join(args.results_dir, args.hop_cdf_csv)
+        run_hop_cdf(hop_cdf_csv, args.hop_cdf_out, show=show)
+
+    if not args.skip_common:
+        local_csv  = os.path.join(args.results_dir, args.memo_local_csv)
+        usa_csv    = os.path.join(args.results_dir, args.memo_usa_csv)
+        global_csv = os.path.join(args.results_dir, args.memo_global_csv)
+        run_common_blocktime_vs_shards(
+            local_csv, usa_csv, global_csv,
+            outdir=args.common_out,
+            show=show,
+            block_size=args.common_bt_blocksize,
+        )
+        run_common_tps_vs_shards(
+            local_csv, usa_csv, global_csv,
+            outdir=args.common_out,
+            show=show,
+            block_size=args.common_tps_blocksize,
+        )
 
     # Per-signature-scheme plots
     _SIG_SCHEMES = ["ed25519", "dilithium2", "falcon512", "sphincs_sha2_128s"]

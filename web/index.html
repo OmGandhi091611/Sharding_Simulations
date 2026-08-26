@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Broadcast Protocol Animation</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="controls">
+    <label>Protocol
+      <select id="protocol-select">
+        <option value="gossip">Gossip</option>
+        <option value="plumtree">Plumtree</option>
+        <option value="gossipsub">GossipSub</option>
+        <option value="flood">Flood</option>
+      </select>
+    </label>
+
+    <label id="block-control" style="display:none">Block
+      <select id="block-select"></select>
+    </label>
+
+    <button id="step-back">&#8592; Step</button>
+    <button id="play-pause">Play</button>
+    <button id="step-forward">Step &#8594;</button>
+
+    <label>Speed
+      <input id="speed" type="range" min="100" max="1500" step="100" value="500" />
+    </label>
+
+    <span class="stat" id="round-label">Round 0 / 0</span>
+    <span class="stat" id="message-label">Messages: 0</span>
+    <span class="stat" id="tree-label" style="display:none">Tree: 0 eager / 0 lazy</span>
+  </div>
+
+  <svg id="viz"></svg>
+
+  <div id="legend"></div>
+
+  <div id="compare">
+    <span class="compare-title">Once stabilized (fewer messages, more hops):</span>
+    <span id="compare-rows"></span>
+  </div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="network_viz.js"></script>
+</body>
+</html>

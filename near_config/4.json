@@ -31,5 +31,9 @@
   "verify_mode": "shard",
   "near_realistic": false,
   "results_csv": "Near.csv",
-  "results_dir": "Results"
+  "results_dir": "Results",
+  "broadcast_protocol": "gossip",
+  "shard_comm_protocol": "kademlia",
+  "gossip_fanout": 10,
+  "kademlia_bucket_bits": 1
 }

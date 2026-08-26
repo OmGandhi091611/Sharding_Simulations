@@ -31,7 +31,9 @@ This framework provides a controlled simulation environment to study the through
 12. [Graphs Produced Per Chain](#graphs-produced-per-chain)
 13. [Results CSV Format](#results-csv-format)
 14. [Validation](#validation)
-15. [Citation](#citation)
+15. [Network Protocol Comparison](#network-protocol-comparison)
+16. [Broadcast Protocol Animation](#broadcast-protocol-animation)
+17. [Citation](#citation)
 
 ---
 
@@ -41,8 +43,11 @@ This framework provides a controlled simulation environment to study the through
 .
 ├── simulation.py                  # Main discrete-event simulator (SimPy)
 ├── graph.py                       # Plot generator — reads CSVs, writes PNG figures
+├── graph_network.py               # Plot generator — broadcast-protocol comparison CSVs -> PNG figures
+├── export_broadcast_animation.py  # Exports per-round protocol events -> Results/broadcast_animation/*.json
 ├── merge_results.c                # OpenMP-parallel CSV merger
-├── requirements.txt               # Python dependencies
+├── requirements.txt                # Python dependencies
+├── BROADCAST_ANIMATION.md         # Write-up + plain-English explainer for the broadcast animation
 ├── LICENSE
 │
 ├── memo_config/
@@ -58,7 +63,13 @@ This framework provides a controlled simulation environment to study the through
 ├── Parallel_processes/
 │   ├── memo_parallel.py           # Grid sweep: shards × blocksize × blocktime × sig_scheme
 │   ├── near_parallel.py           # Fixed 3-run sweep (4/6/9 shards)
-│   └── non_sharded_parallel.py    # Grid sweep: blocksize × blocktime
+│   ├── non_sharded_parallel.py    # Grid sweep: blocksize × blocktime
+│   └── network_parallel.py        # Grid sweep: broadcast_protocol × shard_comm_protocol
+│
+├── web/                           # D3.js viewer for the broadcast protocol animation
+│   ├── index.html
+│   ├── style.css
+│   └── network_viz.js
 │
 ├── Results/
 │   ├── memo_results_local.csv     # MEMO results — local network (RTT ~2 ms)
@@ -66,13 +77,17 @@ This framework provides a controlled simulation environment to study the through
 │   ├── memo_results_global.csv    # MEMO results — global WAN (RTT ~150 ms)
 │   ├── Near.csv                   # NEAR 4/6/9-shard results
 │   ├── non-sharded.csv            # Non-sharded results
-│   └── Validation.csv             # Validation against real cryptocurrencies
+│   ├── Validation.csv             # Validation against real cryptocurrencies
+│   ├── network_results_<env>.csv  # Broadcast-protocol comparison results per network condition
+│   ├── network_runs/hopcdf/       # Curated hop-count CDF reference (one CSV per protocol)
+│   └── broadcast_animation/       # Per-round JSON exports consumed by web/ (gossip/plumtree/gossipsub/flood)
 │
 ├── memo_graphs_local/             # MEMO figures — local condition
 ├── memo_graphs_usa/               # MEMO figures — US WAN condition
 ├── memo_graphs_global/            # MEMO figures — global WAN condition
 ├── near_graphs/                   # NEAR bar charts vs targets
 ├── non_sharded_graphs/            # Non-sharded heatmaps
+├── network_graphs_<env>/          # Broadcast-protocol comparison figures per network condition
 ├── Validations/                   # Real-world comparison figures
 │
 ├── memo_logs/                     # Per-run stdout logs for MEMO
@@ -500,16 +515,55 @@ Three network conditions model different deployment environments. Each writes to
 
 | Condition | `rtt_ms` | `control_bw_mbps` | `results_csv` | Graph folder |
 |---|---|---|---|---|
-| Local | 2 | 2 000 | `memo_results_local.csv` | `memo_graphs_local/` |
-| US WAN | 50 | 200 | `memo_results_usa.csv` | `memo_graphs_usa/` |
-| Global WAN | 150 | 100 | `memo_results_global.csv` | `memo_graphs_global/` |
+| Local | 0.3 | 10 000 | `memo_results_local.csv` | `memo_graphs_local/` |
+| US WAN | 60 | 1 000 | `memo_results_usa.csv` | `memo_graphs_usa/` |
+| Global WAN | 180 | 50 | `memo_results_global.csv` | `memo_graphs_global/` |
 
-Edit `memo_config/base.json` before each sweep:
+`Local` models a single-rack, top-of-rack-switch deployment: ~0.3ms RTT (realistic
+same-rack round-trip including software/OS network-stack overhead — pure switch/wire
+latency is often even lower, tens of microseconds) and 10 Gbps of control-plane
+bandwidth (a modest slice of a modern 10-100 Gbps host NIC).
+
+`US WAN` models a cross-country private backbone (e.g. NYC ↔ SF): ~60ms RTT (matches
+published cloud inter-region latencies) and 1 Gbps of control-plane bandwidth (a
+well-provisioned but not fully dedicated leased-line/cloud-backbone allocation).
+
+`Global WAN` models intercontinental P2P nodes on ordinary internet connections
+(not a private hyperscaler backbone): ~180ms RTT (representative of US↔Asia/Australia
+routes, the harsher end of "global" rather than just transatlantic) and only 50 Mbps
+of control-plane bandwidth, reflecting typical realistic uplink capacity for a single
+globally-distributed peer.
+
+**RTT sourcing:** the RTT figures above are grounded in real measurements, not
+guesses. Local (~0.3ms) is bounded below by measured datacenter/top-of-rack
+switch RTT (~5-200µs; see the PL2 rack-scale-networking paper,
+[arXiv:2101.06537](https://arxiv.org/pdf/2101.06537)). US WAN (~60ms) matches
+measured AWS `us-east-1↔us-west-1/us-west-2` round-trip latency (~65-70ms; see
+[cloudping.co](https://www.cloudping.co/) and
+[economize.cloud's AWS latency matrix](https://www.economize.cloud/resources/aws/latency/)).
+Global WAN (~180ms) sits within the measured range for AWS US↔Sydney/Tokyo
+intercontinental routes (~150-260ms across the same two sources).
+
+**Bandwidth is an assumption, not independently sourced.** Unlike the RTT
+figures, `control_bw_mbps` for each condition (10,000 / 1,000 / 50 Mbps) is an
+engineering estimate of plausible control-plane capacity per condition, not a
+value backed by a specific published measurement — treat it as a modeling
+choice when interpreting or citing results.
+
+For the network/broadcast-protocol sweep (`Parallel_processes/network_parallel.py`,
+which produces `network_results_<env>.csv` and the `memo_results_<env>.csv`
+aggregates derived from it), these three conditions are applied automatically
+per run via `NETWORK_ENV` — see [Network Protocol Comparison](#network-protocol-comparison)
+below; `memo_config/base.json` no longer needs to be hand-edited for that sweep.
+
+For the MEMO signature-scheme sweep (`Parallel_processes/memo_parallel.py`),
+network condition is still set manually by editing `memo_config/base.json`
+before each run:
 
 ```json
-{ "rtt_ms": 2,   "control_bw_mbps": 2000 }   // Local
-{ "rtt_ms": 50,  "control_bw_mbps": 200  }   // US WAN
-{ "rtt_ms": 150, "control_bw_mbps": 100  }   // Global WAN
+{ "rtt_ms": 0.3, "control_bw_mbps": 10000 }  // Local
+{ "rtt_ms": 60,  "control_bw_mbps": 1000 }   // US WAN
+{ "rtt_ms": 180, "control_bw_mbps": 50   }   // Global WAN
 ```
 
 ---
@@ -675,6 +729,54 @@ Validation compares simulator output against known real-world values for Bitcoin
 ```bash
 python graph.py --skip_near --skip_memo --skip_non --no_show
 ```
+
+---
+
+## Network Protocol Comparison
+
+A separate sweep, independent of the Chain 1/2/3 architecture comparison above, that answers a different question: **which broadcast/communication protocol is fastest and cheapest**, not which sharding architecture is fastest. Signature scheme is fixed to `ed25519` so the grid stays about protocol/network behavior rather than signature cost.
+
+### What the sweep covers
+
+`Parallel_processes/network_parallel.py` sweeps `broadcast_protocol` (`gossip`, `flood`, `plumtree`, `gossipsub`) × `shard_comm_protocol` (`kademlia`) across the same shard-count/block-size/block-time grid used elsewhere, at a fixed topology of 1 024 nodes / 512 neighbors per node. Network condition (local/US WAN/global WAN) is selected via `NETWORK_ENV`, which automatically overrides `--rtt_ms`/`--control_bw_mbps` on each `simulation.py` invocation with the values from the [Network Condition Variants](#network-condition-variants) table above — no manual `memo_config/base.json` editing needed for this sweep. `NETWORK_ENV=custom` (the default) skips the override and falls back to whatever `memo_config/base.json` currently has.
+
+A small reference subset of the grid also keeps its full hop-count distribution (not just aggregate stats), written to `Results/network_runs/hopcdf/<broadcast_protocol>_<shard_comm_protocol>.csv` — this is the data behind the "Plumtree needs more hops" finding referenced in [Broadcast Protocol Animation](#broadcast-protocol-animation) below.
+
+### Run
+
+```bash
+NETWORK_ENV=local  python Parallel_processes/network_parallel.py
+NETWORK_ENV=usa    python Parallel_processes/network_parallel.py
+NETWORK_ENV=global python Parallel_processes/network_parallel.py
+```
+
+### Output graphs
+
+```bash
+python graph_network.py --network_csv network_results_local.csv  --network_out network_graphs_local  --no_show
+python graph_network.py --network_csv network_results_usa.csv    --network_out network_graphs_usa    --no_show
+python graph_network.py --network_csv network_results_global.csv --network_out network_graphs_global --no_show
+```
+
+Stored in `network_graphs_<env>/` — TPS/message/hop-count comparisons across the four broadcast protocols, one set of figures per network condition.
+
+---
+
+## Broadcast Protocol Animation
+
+An interactive, round-by-round visualization of how Gossip, Plumtree, and GossipSub actually propagate a message across the network — built to make the protocol-comparison results above (and the hop-count CDFs in particular) easier to reason about than aggregate numbers alone. See **[`BROADCAST_ANIMATION.md`](BROADCAST_ANIMATION.md)** for the full write-up, including a plain-English explanation of how Plumtree's self-organizing tree works and why it trades messages for hops.
+
+It directly instruments the same `simulate_gossip`, `simulate_adaptive_plumtree`, and `simulate_gossipsub` functions used by the sweep above (an opt-in per-round event log that costs nothing when not requested), exports a small illustrative topology's worth of per-round events to JSON, and renders them as an animated force-directed graph in the browser.
+
+### Run
+
+```bash
+python export_broadcast_animation.py     # writes Results/broadcast_animation/*.json
+python -m http.server 8000               # from the repo root
+# open http://localhost:8000/web/index.html
+```
+
+Pick a protocol from the dropdown, then Step or Play through rounds. For Plumtree, use the Block selector to jump between successive broadcasts and watch the persistent tree overlay (thick green = currently eager/tree edge, thin dashed grey = currently lazy) sparsen and stabilize over the first few blocks — a small "stabilized rounds vs. messages" comparison across all four protocols is shown at the bottom of the page.
 
 ---
 

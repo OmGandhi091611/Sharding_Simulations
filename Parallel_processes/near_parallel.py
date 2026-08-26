@@ -3,6 +3,7 @@ import subprocess
 import sys
 import os
 import threading
+import itertools
 import json
 import csv
 from datetime import datetime
@@ -11,19 +12,56 @@ from typing import Dict, Any, Optional, List, Tuple
 # --- adjust this if your main sim file has a different name ---
 SIM_SCRIPT = "simulation.py"
 
-CONFIGS = {
+BASE_CONFIGS = {
     "near_obs_s4": "near_config/4.json",
     "near_obs_s6": "near_config/6.json",
     "near_obs_s9": "near_config/9.json",
 }
+
+# Communication protocols to sweep — uncomment the baseline to compare
+# gossip/Kademlia against the original flat flood/direct model. All three
+# base configs above already have "leader_metronome": true, so these
+# flags take effect for all of them.
+BROADCAST_PROTOCOLS = [
+    "gossip",
+    # "flood",
+]
+
+SHARD_COMM_PROTOCOLS = [
+    "kademlia",
+    # "direct",
+]
+
+
+def build_configs() -> Dict[str, Dict[str, str]]:
+    """
+    Cross each base (shard-count) config with each protocol combo. Each
+    resulting run gets its own name so results don't collide, and its own
+    protocol CLI overrides on top of the shared config file.
+    """
+    runs = {}
+    for base_name, cfg_path in BASE_CONFIGS.items():
+        for bprot, scomm in itertools.product(BROADCAST_PROTOCOLS, SHARD_COMM_PROTOCOLS):
+            run_name = f"{base_name}_{bprot}_{scomm}"
+            runs[run_name] = {
+                "config": cfg_path,
+                "broadcast_protocol": bprot,
+                "shard_comm_protocol": scomm,
+            }
+    return runs
+
+
+CONFIGS = build_configs()
 
 LOG_DIR = "near_logs"
 
 # Your NEAR results file name (as you requested)
 RESULTS_CSV = "Near.csv"
 
-# Used to decide update vs append
-ROW_KEY_FIELD = "config"
+# "run" is unique per (shard-config, protocol) combo; "config" is not,
+# since multiple protocol combos share the same config file and would
+# otherwise overwrite each other's rows.
+ROW_KEY_FIELD = "run"
 
 
 # ----------------------------
@@ -148,6 +186,8 @@ def upsert_results_csv(csv_path: str, key_field: str, new_rows: List[Dict[str, A
         "num_blocks",
         "blocktime_cfg_sim",
         "expected_blocktime",
+        "broadcast_protocol",
+        "shard_comm_protocol",
     ]
     ordered = [f for f in preferred_order if f in all_fields]
     remaining = sorted([f for f in all_fields if f not in ordered])
@@ -190,13 +230,17 @@ def stream_output(name: str, proc: subprocess.Popen, log_path: str):
         pass
 
 
-def launch_sim(name: str, cfg_path: str) -> subprocess.Popen:
-    """Launch one simulator process with a given config file."""
+def launch_sim(name: str, cfg_path: str, broadcast_protocol: str,
+               shard_comm_protocol: str) -> subprocess.Popen:
+    """Launch one simulator process with a given config file, overriding
+    the protocol flags on the command line so they win over the config."""
     if not os.path.exists(cfg_path):
         raise FileNotFoundError(f"Config not found: {cfg_path}")
 
     proc = subprocess.Popen(
-        [sys.executable, "-u", SIM_SCRIPT, "--config", cfg_path],
+        [sys.executable, "-u", SIM_SCRIPT, "--config", cfg_path,
+         "--broadcast_protocol", broadcast_protocol,
+         "--shard_comm_protocol", shard_comm_protocol],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -210,11 +254,14 @@ def main():
 
     # read config metadata up-front
     meta: Dict[str, Dict[str, Any]] = {}
-    for name, cfg_path in CONFIGS.items():
+    for name, run_info in CONFIGS.items():
+        cfg_path = run_info["config"]
         cfg_info = read_config_fields(cfg_path)
         meta[name] = {
             "run": name,
             "config": cfg_path,
+            "broadcast_protocol": run_info["broadcast_protocol"],
+            "shard_comm_protocol": run_info["shard_comm_protocol"],
             "shards_cfg": cfg_info.get("shards_cfg"),
             "blocktime_cfg": cfg_info.get("blocktime_cfg"),
             "blocksize_cfg": cfg_info.get("blocksize_cfg"),
@@ -224,9 +271,13 @@ def main():
     threads = []
 
     # Start all runs in parallel
-    for name, cfg_path in CONFIGS.items():
-        print(f"Starting simulation {name} with config {cfg_path}")
-        proc = launch_sim(name, cfg_path)
+    for name, run_info in CONFIGS.items():
+        cfg_path = run_info["config"]
+        print(f"Starting simulation {name} with config {cfg_path} "
+              f"(broadcast={run_info['broadcast_protocol']}, "
+              f"shard_comm={run_info['shard_comm_protocol']})")
+        proc = launch_sim(name, cfg_path, run_info["broadcast_protocol"],
+                           run_info["shard_comm_protocol"])
         procs.append((name, proc))
 
         log_path = os.path.join(LOG_DIR, f"{name}.log")

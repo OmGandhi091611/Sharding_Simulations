@@ -23,7 +23,7 @@
 #include <omp.h>
 
 #define MAX_LINE  4096
-#define MAX_FILES 4096
+#define MAX_FILES 65536
 
 /* One data row per input file */
 static char rows[MAX_FILES][MAX_LINE];
